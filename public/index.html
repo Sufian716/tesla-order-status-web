@@ -376,6 +376,7 @@ function allDataSection(entry) {
     if (rows.length) groups.push({ name, rows });
   };
   push('Konto-Übersicht (owner-api)', entry.account, 'order.');
+  if (entry.websiteOrders !== undefined) push('Bestellliste der Tesla-Website (oxp-bff-api)', entry.websiteOrders, 'website.');
   push('Bestellung (/order)', entry.meta, 'meta.');
   push('Reservierungsdetails (App-Endpunkt ownership/reservation-details)', entry.extra?.reservationDetails, 'reservation.');
   if (entry.extra?.reservationDetailsError) groups.push({ name: 'Reservierungsdetails (App-Endpunkt)', rows: [`<dt>Antwort</dt><dd class="empty">${esc(entry.extra.reservationDetailsError)}</dd>`] });
@@ -388,6 +389,56 @@ function allDataSection(entry) {
     <p class="muted">Jede nicht-leere Angabe aus der Tesla-Antwort, wie TOST mit „--all“. Fahre mit der Maus über einen Namen, um den technischen Pfad zu sehen.</p>
     ${groups.map((g) => `<details open class="grp"><summary>${esc(g.name)} <span class="muted">(${g.rows.length})</span></summary><dl class="plain all">${g.rows.join('')}</dl></details>`).join('')}
   </div>`;
+}
+
+// ---------- Lieferbereitschaft: Teslas interne Checkliste aus der Bestellantwort ----------
+const READINESS_NAMES = [
+  [/EXIT|FACTORY|LEFT_PLANT/i, 'Fahrzeug hat das Werk verlassen'], [/INVOICE/i, 'Endrechnung'], [/FINAL.?PAYMENT|PAYMENT/i, 'Schlusszahlung'],
+  [/TRANSPORT|SHIP|CARRIER/i, 'Fahrzeug bereit für Transport'], [/SCHEDUL|APPOINTMENT/i, 'Übergabetermin'], [/PREP/i, 'Interne Liefervorbereitung'],
+  [/INSURANCE/i, 'Versicherung'], [/REGISTR/i, 'Zulassung'], [/DOCUMENT|PAPER/i, 'Papiere'], [/INSPECT|QUALITY|QA/i, 'Qualitätsprüfung'],
+  [/ARRIV|AT_DC|DELIVERY_CENTER/i, 'Im Lieferzentrum angekommen'], [/VIN/i, 'FIN'], [/READY/i, 'Fahrzeug bereit'],
+];
+const readinessLabel = (name) => { for (const [re, de] of READINESS_NAMES) if (re.test(name)) return de; return null; };
+function readinessItems(value, prefix = '') {
+  const items = [];
+  const nameKeys = ['name', 'key', 'id', 'type', 'title', 'label', 'gate', 'task', 'code', 'milestone'];
+  const stateKeys = ['status', 'complete', 'isComplete', 'completed', 'value', 'state', 'enabled', 'isEnabled', 'passed', 'done', 'date', 'completedAt', 'completedDate'];
+  if (Array.isArray(value)) {
+    for (const it of value) {
+      if (it && typeof it === 'object') {
+        const name = nameKeys.map((k) => it[k]).find((v) => typeof v === 'string') ?? JSON.stringify(it).slice(0, 60);
+        const states = stateKeys.filter((k) => it[k] !== undefined && it[k] !== null && it[k] !== '').map((k) => `${k}: ${typeof it[k] === 'boolean' ? (it[k] ? 'ja' : 'nein') : (parseIso(String(it[k])) ? fmtDate(String(it[k])) : it[k])}`);
+        items.push({ name: String(name), state: states.join(' · ') || null });
+      } else if (it != null) items.push({ name: String(it), state: null });
+    }
+  } else if (value && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value)) {
+      if (v && typeof v === 'object') items.push(...readinessItems(v, prefix + k + '.'));
+      else if (v !== null && v !== '') items.push({ name: prefix + k, state: typeof v === 'boolean' ? (v ? 'ja' : 'nein') : (parseIso(String(v)) ? fmtDate(String(v)) : String(v)) });
+    }
+  }
+  return items;
+}
+function readinessSection(entry) {
+  const t = entry.details?.tasks ?? {};
+  const sources = [
+    ['Lieferbereitschaft (deliveryReadinessDetail)', pick(t, 'finalPayment.data.deliveryReadinessDetail')],
+    ['Lieferbereitschaft (deliveryReadiness)', pick(t, 'finalPayment.data.deliveryReadiness')],
+    ['Übergabe-Gates (deliveryAcceptance.gates)', pick(t, 'deliveryAcceptance.gates')],
+    ['Selbstbuchung (selfSchedulingDetails)', pick(t, 'finalPayment.data.selfSchedulingDetails')],
+    ['Lieferdetails (deliveryDetails)', t.deliveryDetails ? Object.fromEntries(Object.entries(t.deliveryDetails).filter(([k]) => !/^(card|strings|order|required|default|enabled|complete|id)$/.test(k))) : null],
+  ].filter(([, v]) => v && (Array.isArray(v) ? v.length : Object.keys(v).length));
+  if (!sources.length) return '';
+  const blocks = sources.map(([title, v]) => {
+    const items = readinessItems(v);
+    if (!items.length) return '';
+    return `<h2 class="sub">${esc(title)}</h2><dl class="plain all">${items.map((i) => {
+      const de = readinessLabel(i.name);
+      return `<dt title="${esc(i.name)}">${esc(de ? `${de}` : i.name)}${de ? ` <span class="muted">(${esc(i.name)})</span>` : ''}</dt><dd>${i.state == null ? '<span class="muted">–</span>' : esc(i.state)}</dd>`;
+    }).join('')}</dl>`;
+  }).join('');
+  return blocks ? `<div class="card"><h2>Lieferbereitschaft <span class="muted">(Tesla-interne Checkliste)</span></h2>
+    <p class="muted">Diese Einträge pflegt Tesla intern für Logistik und Übergabe, zum Beispiel „Fahrzeug hat das Werk verlassen“ oder „bereit für Transport“. Sie werden hier roh angezeigt, so wie Tesla sie liefert.</p>${blocks}</div>` : '';
 }
 
 function productionSection(entry, hist) {
@@ -529,6 +580,7 @@ function render(entry, hist) {
     ${vehicleRows ? `<div class="card"><h2>Fahrzeugstatus</h2><dl class="plain">${vehicleRows}</dl></div>` : ''}
     <div class="card"><h2>Auslieferung</h2><dl class="plain">${deliveryRows}</dl></div>
     ${productionSection(entry, hist)}
+    ${readinessSection(entry)}
     <div class="card"><h2>Status im Detail</h2><dl class="plain">${statusRows}</dl>${tipsHtml}</div>
     <div class="card"><h2>Zahlung &amp; Finanzierung</h2><dl class="plain">${paymentRows}${paymentStatus}</dl></div>
     <div class="card"><h2>Bestellverlauf</h2>${tlHtml}</div>
@@ -569,8 +621,9 @@ async function show(data, cached) {
     ? `<div class="card error"><strong>Hinweis</strong><p>Die Konto-Übersicht (owner-api) konnte nicht geladen werden, daher fehlen Bestellstatus, Modellcode und Konfiguration: ${esc(data.accountError)}</p></div>`
     : '';
   out.innerHTML = notice + (data.orders?.length
-    ? data.orders.map((o) => render(o, hist[o.referenceNumber])).join('')
-    : '<div class="card"><p class="empty">Keine Bestellungen gefunden.</p></div>') + vehiclesCard;
+    ? data.orders.map((o) => render({ ...o, websiteOrders: data.websiteOrders ?? undefined }, hist[o.referenceNumber])).join('')
+    : '<div class="card"><p class="empty">Keine Bestellungen gefunden.</p></div>') + vehiclesCard
+    + (data.websiteOrdersError ? `<p class="muted">Bestellliste der Tesla-Website (oxp-bff-api) nicht abrufbar: ${esc(data.websiteOrdersError)}</p>` : '');
   renderHistory(hist);
   const when = new Date(data.fetchedAt).toLocaleString(LOCALE);
   metaEl.textContent = cached ? `Zwischengespeicherte Daten von ${when}` : `Abgerufen ${when}`;
@@ -609,11 +662,12 @@ const SAFE_KEY = /(date|time|^eta|window|status|type|country|currency|model|code
 const ENUM_LIKE = /^[A-Z0-9_ .:-]{1,40}$/;
 function diagnose(data) {
   const lines = [`Abruf: ${data.fetchedAt}`, `Bestellungen: ${(data.orders || []).length}`, `Konto-Übersicht Fehler: ${data.accountError || 'keiner'}`,
-    `Fahrzeuge im Konto: ${Array.isArray(data.vehicles) ? data.vehicles.length : 'n/a'} (Fehler: ${data.vehiclesError || 'keiner'})`];
+    `Fahrzeuge im Konto: ${Array.isArray(data.vehicles) ? data.vehicles.length : 'n/a'} (Fehler: ${data.vehiclesError || 'keiner'})`,
+    `Website-Bestellliste (oxp-bff-api): ${data.websiteOrders ? 'Daten erhalten' : 'keine'} (Fehler: ${data.websiteOrdersError || 'keiner'})`];
   for (const o of data.orders || []) {
     lines.push('', `=== Bestellung ${mask(String(o.referenceNumber))} ===`, `/order Fehler: ${o.metaError || 'keiner'}`, `Fehler: ${o.error || 'keiner'}`,
       `reservation-details Fehler: ${o.extra?.reservationDetailsError || 'keiner'}`);
-    const flat = flatten({ order: o.account ?? {}, meta: o.meta ?? {}, details: o.details ?? {}, reservation: o.extra?.reservationDetails ?? {} }, '', {});
+    const flat = flatten({ order: o.account ?? {}, meta: o.meta ?? {}, details: o.details ?? {}, reservation: o.extra?.reservationDetails ?? {}, website: data.websiteOrders ?? {} }, '', {});
     for (const [k, v] of Object.entries(flat).sort(([a], [b]) => a.localeCompare(b))) {
       if (v === null || v === '' || v === '[]' || v === '{}' || SKIP_IN_ALL.test(k)) continue;
       let shown;
