@@ -71,3 +71,15 @@ ol { padding-left:20px; }
 li { margin:4px 0; }
 p { margin:8px 0; }
 .urlbox { word-break:break-all; font-size:12px; margin-top:10px; }
+h2.sub { margin-top:22px; }
+dl.plain { margin-top:0; padding-top:0; border-top:0; }
+.badge { display:inline-block; padding:1px 8px; border-radius:999px; border:1px solid var(--border); font-size:12px; color:var(--fg); }
+.opt-cat { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; margin:12px 0 4px; }
+.opt-cat:first-of-type { margin-top:0; }
+.opt { display:grid; grid-template-columns:72px 1fr; gap:10px; padding:4px 0; border-bottom:1px solid var(--border); font-size:14px; }
+.opt:last-child { border-bottom:0; }
+.opt .code { color:var(--muted); }
+.tl { display:grid; grid-template-columns:110px 1fr; gap:12px; padding:7px 0; border-bottom:1px solid var(--border); font-size:14px; }
+.tl:last-child { border-bottom:0; }
+.tl-date { color:var(--muted); font-variant-numeric:tabular-nums; }
+@media (max-width:480px) { .opt { grid-template-columns:60px 1fr; } .tl { grid-template-columns:90px 1fr; } }

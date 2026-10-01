@@ -23,15 +23,14 @@
 
 <script>
 const out = document.getElementById('out');
-const meta = document.getElementById('meta');
+const metaEl = document.getElementById('meta');
 const btn = document.getElementById('refresh');
 const LOCALE = 'de-DE';
 const CACHE_KEY = 'tos.lastData';
-const HISTORY_KEY = 'tos.history';
-const CACHE_MS = 5 * 60 * 1000; // Tesla nicht bei jedem Reload anfragen
+const HISTORY_KEY = 'tos.history2';
+const CACHE_MS = 5 * 60 * 1000;
 
 const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-
 const pick = (obj, ...paths) => {
   for (const p of paths) {
     const v = p.split('.').reduce((o, k) => (o == null ? o : o[k]), obj);
@@ -39,35 +38,80 @@ const pick = (obj, ...paths) => {
   }
   return null;
 };
-
-// localStorage kann fehlen (privater Modus): dann einfach ohne Cache/Historie weiterarbeiten.
 const store = {
   get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
   del(k) { try { localStorage.removeItem(k); } catch {} },
 };
 
-const DELIVERY_TYPE = {
-  PICKUP_SERVICE_CENTER: 'Abholung im Service-Center',
-  HOME_DELIVERY: 'Lieferung nach Hause',
-  DIRECT: 'Direktlieferung',
+// ---------- Kataloge (Optionscodes nach TOST, Tesla-Standorte) ----------
+let OPTION_CODES = null;
+let LOCATIONS = null;
+async function loadOptionCodes() {
+  if (OPTION_CODES) return;
+  try { OPTION_CODES = (await (await fetch('/option_codes.json')).json()).codes || {}; } catch { OPTION_CODES = {}; }
+}
+async function loadLocations() {
+  if (LOCATIONS) return;
+  try { LOCATIONS = await (await fetch('/tesla_locations.json')).json(); } catch { LOCATIONS = {}; }
+}
+const CATEGORY_NAMES = {
+  models: 'Modell', paints: 'Lackierung', interiors: 'Innenraum', seating: 'Sitze', wheels: 'Felgen', tires: 'Reifen',
+  autopilot: 'Autopilot', battery: 'Batterie', connectivity: 'Konnektivität', supercharging: 'Supercharging', misc: 'Sonstiges',
 };
+const CATEGORY_ORDER = ['models', 'paints', 'interiors', 'seating', 'wheels', 'tires', 'battery', 'autopilot', 'connectivity', 'supercharging', 'misc', null];
 
-function money(amount, code) {
-  if (amount == null) return null;
-  try {
-    return new Intl.NumberFormat(LOCALE, { style:'currency', currency: code || 'EUR', maximumFractionDigits: 0 }).format(amount);
-  } catch {
-    return `${code || ''} ${amount}`.trim();
-  }
+function decodeOptions(mkt) {
+  if (!mkt) return [];
+  return String(mkt).split(',').map((s) => s.trim().replace(/^\$/, '')).filter(Boolean).map((code) => {
+    const e = OPTION_CODES?.[code];
+    return { code, label: e?.l || null, short: e?.s || null, cat: e?.c || null };
+  });
 }
 
+// Modell / Lack / Innenraum wie in der TOST-Kurzansicht
+function summarizeConfig(options) {
+  let model = null, paint = null, interior = null;
+  for (const o of options) {
+    const label = (o.short || o.label || '').trim();
+    if (!label) continue;
+    if (o.cat === 'paints' || (!o.cat && /^(PP|PN|PS|PA)/.test(o.code))) paint ??= label.replace('Metallic', '').replace('Multi-Coat', '').trim();
+    else if (o.cat === 'interiors' || o.cat === 'seating' && /^(IP|IN|IW|IX|IY)/.test(o.code) || (!o.cat && /^(IP|IN|IW|IX|IY)/.test(o.code))) interior ??= label;
+    if (o.cat === 'models' || (/Model/.test(label) && label.length > 10)) {
+      const m = label.match(/(Model [YSX3])(?:.*?((?:AWD|RWD) (?:LR|SR|P)))?/);
+      model ??= o.short ? label : (m ? (m[2] ? `${m[1]} – ${m[2]}` : label) : label);
+    }
+  }
+  return { model, paint, interior };
+}
+
+// ---------- Formatierung ----------
+function parseIso(v) {
+  if (typeof v !== 'string' || !v.trim()) return null;
+  let s = v.trim().replace(' ', 'T');
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) s += 'T00:00:00';
+  const d = new Date(s);
+  if (isNaN(d)) return null;
+  return { d, hasTime: /T\d{2}:\d{2}/.test(s) && !/T00:00(:00)?/.test(s) };
+}
+function fmtDate(v) {
+  const p = parseIso(v);
+  if (!p) return typeof v === 'string' ? v.trim() : (v == null ? null : String(v));
+  return p.hasTime
+    ? p.d.toLocaleString(LOCALE, { dateStyle: 'medium', timeStyle: 'short' })
+    : p.d.toLocaleDateString(LOCALE, { dateStyle: 'medium' });
+}
+function money(amount, code) {
+  if (amount == null || amount === '') return null;
+  const n = Number(amount);
+  if (isNaN(n)) return String(amount);
+  try { return new Intl.NumberFormat(LOCALE, { style: 'currency', currency: code || 'EUR', maximumFractionDigits: 2 }).format(n); }
+  catch { return `${n} ${code || ''}`.trim(); }
+}
 function row(label, value, cls = '', html = false) {
-  if (value === null) return '';
+  if (value === null || value === undefined || value === '') return '';
   return `<dt>${esc(label)}</dt><dd class="${cls}">${html ? value : esc(value)}</dd>`;
 }
-
-// Referenznummer und VIN maskiert (RN1********), damit man Screenshots teilen kann.
 const mask = (s) => s.slice(0, 3) + '*'.repeat(Math.max(s.length - 3, 0));
 function secret(value) {
   const v = String(value);
@@ -79,114 +123,143 @@ document.addEventListener('click', (e) => {
   const shown = el.dataset.shown === '1';
   el.textContent = shown ? mask(el.dataset.v) : el.dataset.v;
   el.dataset.shown = shown ? '0' : '1';
-  el.title = shown ? 'Klicken zum Anzeigen' : 'Klicken zum Verbergen';
 });
+const yesNo = (v) => v === true ? 'ja' : v === false ? 'nein' : null;
 
-const STEP_NAMES = {
-  registration: 'Registrierung',
-  financing: 'Zahlungsart',
-  scheduling: 'Liefertermin',
-  insurance: 'Versicherung',
-  finalPayment: 'Schlusszahlung',
-  agreements: 'Verträge',
-  deliveryAcceptance: 'Übergabe',
+// Auslieferungstermin wie TOST: deliveryDetails.regData.deliveryAppointment, deliveryDetails.deliveryAppointment,
+// finalPayment.data.deliveryAppointment, dann scheduling.deliveryAppointmentDate / apptDateTimeAddressStr
+function appointmentOf(t) {
+  const sources = [pick(t, 'deliveryDetails.regData.deliveryAppointment'), pick(t, 'deliveryDetails.deliveryAppointment'), pick(t, 'finalPayment.data.deliveryAppointment')];
+  for (const s of sources) {
+    if (!s || typeof s !== 'object') continue;
+    for (const k of ['appointmentDate', 'appointmentDateUtc']) if (parseIso(s[k])) return s[k];
+  }
+  const raw = pick(t, 'scheduling.deliveryAppointmentDate');
+  if (typeof raw === 'string' && raw.trim()) return raw.trim();
+  const txt = pick(t, 'scheduling.apptDateTimeAddressStr');
+  if (typeof txt === 'string') { const first = txt.split('\n')[0].trim(); if (parseIso(first)) return first; }
+  return null;
+}
+
+// ---------- Historie: kompletter Vergleich der Tesla-Antwort wie TOST ----------
+const IGNORE_PATHS = ['.card.', '.strings.', 'details.state', 'isMatched', 'vehicleModelYear', 'isDeliveryEstimatesEnabled',
+  'isAvailableForMatch', 'deliveryReadiness', 'agreementDetails', 'finalPayment.data.vehicleId', 'deliveryAcceptance.gates',
+  'reggieRegistrationStatus', 'finalPayment.complete', 'finalPaymentStatus', 'apptDateTimeAddressStr', 'isInventoryOrMatched',
+  'hasFinalInvoice', 'hasActiveInvoice', 'selfSchedulingDetails.deliveryLocationId', 'registration.orderDetails.vin',
+  'registration.regData.orderDetails.vin', 'finalPayment.data.vin', 'deliveryDetails.regData.orderDetails.vin', 'order.vehicleMapId',
+  'details.tasks.scheduling.deliveryWindowDisplayStr'];
+const PATH_LABELS = {
+  'order.vin': 'FIN', 'order.orderStatus': 'Bestellstatus', 'details.orderStatus': 'Bestellstatus', 'order.modelCode': 'Modell',
+  'order.mktOptions': 'Konfiguration', 'meta.vinShows': 'FIN in der Tesla-App sichtbar', 'meta.motorNumber': 'Motornummer',
+  'details.tasks.scheduling.deliveryWindowDisplay': 'Lieferzeitraum',
+  'details.tasks.scheduling.deliveryAppointmentDate': 'Auslieferungstermin',
+  'details.tasks.scheduling.deliveryAddressTitle': 'Auslieferungszentrum',
+  'details.tasks.scheduling.deliveryType': 'Lieferart',
+  'details.tasks.finalPayment.data.etaToDeliveryCenter': 'Voraussichtliche Ankunft im Lieferzentrum',
+  'details.tasks.registration.orderDetails.vehicleRoutingLocation': 'Abholort',
+  'details.tasks.registration.expectedRegDate': 'Voraussichtliches Zulassungsdatum',
+  'details.tasks.registration.orderDetails.reservationDate': 'Reservierungsdatum',
+  'details.tasks.registration.orderDetails.orderBookedDate': 'Bestelldatum',
+  'details.tasks.registration.orderDetails.vehicleOdometer': 'Kilometerstand',
+  'details.tasks.registration.orderDetails.registrationStatus': 'Zulassungsstatus',
+  'details.tasks.finalPayment.data.paymentDetails': 'Zahlungsdetails',
+  'details.tasks.finalPayment.data.accountBalance': 'Kontostand',
+  'details.tasks.finalPayment.data.amountDue': 'Offener Betrag',
+  'details.tasks.finalPayment.amountDue': 'Offener Betrag',
+  'details.tasks.finalPayment.data.amountDueAfterRefund': 'Nach Rückerstattung fälliger Betrag',
+  'details.tasks.finalPayment.data.amountDueFinancier': 'Finanzierter Betrag',
+  'details.tasks.finalPayment.data.financingDetails.financialProductType': 'Finanzierungsprodukt',
+  'details.tasks.finalPayment.data.financingDetails.teslaFinanceDetails.financePartnerName': 'Finanzierungspartner',
+  'details.tasks.finalPayment.data.financingDetails.teslaFinanceDetails.monthlyPayment': 'Monatliche Rate',
+  'details.tasks.finalPayment.data.financingDetails.teslaFinanceDetails.termsInMonths': 'Vertragslaufzeit (Monate)',
+  'details.tasks.finalPayment.data.financingDetails.teslaFinanceDetails.interestRate': 'Zinssatz',
+  'details.tasks.finalPayment.data.financingDetails.teslaFinanceDetails.mileage': 'Laufleistung pro Jahr',
+  'details.tasks.finalPayment.data.financingDetails.teslaFinanceDetails.approvedLoanAmount': 'Genehmigter Betrag',
+  'details.tasks.finalPayment.status': 'Zahlungsstatus',
+  'details.tasks.finalPayment.data.vehicleregistration': 'Fahrzeugzulassung',
+  'details.tasks.finalPayment.data.vehicleParts': 'Fahrzeugteile',
+  'details.tasks.deliveryAcceptance.vehicleIsReady': 'Fahrzeug bereit',
 };
-
-// ---------- Änderungs-Historie (im Browser, localStorage) ----------
-const FIELDS = {
-  vin: 'VIN',
-  motorNumber: 'Motornummer',
-  vinShows: 'Tesla zeigt die VIN an',
-  deliveryWindow: 'Lieferfenster',
-  appointment: 'Übergabetermin',
-  deliveryType: 'Lieferart',
-  deliveryPlace: 'Übergabeort',
-  amountDue: 'Offener Betrag',
-  amountSent: 'Bezahlt',
-  vehicleIsReady: 'Fahrzeug bereit',
-  registration: 'Schritt: Registrierung',
-  financing: 'Schritt: Zahlungsart',
-  scheduling: 'Schritt: Liefertermin',
-  insurance: 'Schritt: Versicherung',
-  finalPayment: 'Schritt: Schlusszahlung',
-  agreements: 'Schritt: Verträge',
-  deliveryAcceptance: 'Schritt: Übergabe',
-};
-const STEP_KEYS = ['registration','financing','scheduling','insurance','finalPayment','agreements','deliveryAcceptance'];
-
-function stepState(t) {
-  if (!t) return null;
-  const state = t.complete === true ? 'erledigt' : t.enabled === true ? 'offen' : 'wartet';
-  const title = pick(t, 'card.title');
-  return title ? `${state} (${title})` : state;
+function flatten(obj, prefix, outMap) {
+  if (Array.isArray(obj)) outMap[prefix] = JSON.stringify(obj);
+  else if (obj && typeof obj === 'object') for (const [k, v] of Object.entries(obj)) flatten(v, prefix ? `${prefix}.${k}` : k, outMap);
+  else outMap[prefix] = obj ?? null;
+  return outMap;
 }
-
-function snapshot(entry) {
-  const t = entry?.details?.tasks ?? {};
-  const m = entry?.meta ?? {};
-  const s = {
-    vin: pick(entry?.account ?? {}, 'vin') ?? pick(m, 'vin', 'vehicleVin') ?? pick(t, 'insurance.vin', 'insurance.insuredVIN'),
-    motorNumber: pick(m, 'motorNumber'),
-    vinShows: m.vinShows ?? null,
-    deliveryWindow: pick(t, 'scheduling.deliveryWindowDisplay'),
-    appointment: pick(t, 'scheduling.apptDateTimeAddressStr', 'scheduling.deliveryAppointmentDate'),
-    deliveryType: pick(t, 'scheduling.deliveryType', 'deliveryAcceptance.deliveryType'),
-    deliveryPlace: pick(t, 'scheduling.deliveryAddressTitle'),
-    amountDue: pick(t, 'finalPayment.amountDue'),
-    amountSent: t?.finalPayment?.amountSent ?? null,
-    vehicleIsReady: t?.deliveryAcceptance?.vehicleIsReady ?? null,
-  };
-  for (const k of STEP_KEYS) s[k] = stepState(t[k]);
-  return s;
+function diffDeep(a, b) {
+  const fa = flatten(a, '', {}), fb = flatten(b, '', {});
+  const changes = [];
+  for (const k of new Set([...Object.keys(fa), ...Object.keys(fb)])) {
+    if (IGNORE_PATHS.some((p) => k.includes(p))) continue;
+    const va = fa[k] ?? null, vb = fb[k] ?? null;
+    if (JSON.stringify(va) !== JSON.stringify(vb)) changes.push({ path: k, before: va, after: vb });
+  }
+  return changes;
 }
-
-function diff(before, after) {
-  if (!before) return [];
-  return Object.keys(FIELDS)
-    .filter((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null))
-    .map((k) => ({ field: k, before: before[k] ?? null, after: after[k] ?? null }));
-}
-
+function trackable(entry) { return { order: entry.account ?? {}, details: entry.details ?? {}, meta: entry.meta ?? {} }; }
 function recordHistory(data) {
   const hist = store.get(HISTORY_KEY) || {};
   for (const entry of data.orders || []) {
     if (!entry.details) continue;
     const rn = entry.referenceNumber;
-    const current = snapshot(entry);
-    const list = hist[rn] || [];
-    const previous = list.length ? list[list.length - 1].snapshot : null;
-    const changes = diff(previous, current);
-    if (!previous || changes.length) {
-      list.push({ at: data.fetchedAt, snapshot: current, changes });
-      hist[rn] = list.slice(-100);
+    const current = trackable(entry);
+    const h = hist[rn] || { firstAt: data.fetchedAt, changes: [], last: null };
+    if (h.last) {
+      for (const c of diffDeep(h.last, current)) h.changes.push({ at: data.fetchedAt, ...c });
+      if (h.changes.length > 500) h.changes = h.changes.slice(-500);
     }
+    h.last = current;
+    h.lastAt = data.fetchedAt;
+    hist[rn] = h;
   }
   store.set(HISTORY_KEY, hist);
   return hist;
 }
+const pathLabel = (p) => PATH_LABELS[p] || p.replace(/^details\.tasks\./, '').replace(/^details\./, '').replace(/^order\./, 'Konto: ');
+function fmtChangeValue(path, v) {
+  if (v == null || v === '') return '(leer)';
+  if (path === 'order.vin') return secret(v);
+  if (/Date|eta|Eta/.test(path) && parseIso(v)) return esc(fmtDate(v));
+  if (path === 'order.mktOptions') return esc(String(v).split(',').map((c) => c.trim().replace(/^\$/, '')).join(', '));
+  if (typeof v === 'boolean') return v ? 'ja' : 'nein';
+  const s = String(v);
+  return esc(s.length > 160 ? s.slice(0, 160) + '…' : s);
+}
 
-function renderHistory(hist) {
-  for (const [rn, entries] of Object.entries(hist)) {
-    const box = document.getElementById('hist-' + rn);
-    if (!box) continue;
-    const withChanges = entries.filter((e) => e.changes?.length).reverse();
-    if (!withChanges.length) {
-      const since = new Date(entries[0].at).toLocaleDateString(LOCALE);
-      box.innerHTML = `<h2>Änderungen</h2><p class="empty">Keine Änderungen seit ${esc(since)}. Jeder Abruf in diesem Browser wird verglichen.</p>`;
-      continue;
-    }
-    box.innerHTML = '<h2>Änderungen</h2>' + withChanges.slice(0, 12).map((e) => `
-      <div class="chg">
-        <div class="chg-when">${esc(new Date(e.at).toLocaleString(LOCALE))}</div>
-        ${e.changes.map((c) => {
-          const fmt = (v) => v == null || v === '' ? '(leer)' : c.field === 'vin' ? secret(v) : esc(v);
-          return `<div><b>${esc(FIELDS[c.field] ?? c.field)}</b>: ${fmt(c.before)} <span class="arrow">→</span> ${fmt(c.after)}</div>`;
-        }).join('')}
-      </div>`).join('');
-  }
+// ---------- Bestellverlauf (Timeline) wie TOST ----------
+function timelineOf(entry, hist) {
+  const t = entry.details?.tasks ?? {};
+  const reg = t.registration ?? {}, oi = reg.orderDetails ?? {}, fp = t.finalPayment?.data ?? {}, sch = t.scheduling ?? {};
+  const items = [];
+  const add = (ts, key, value = '') => { if (ts) items.push({ ts, key, value }); };
+  add(oi.reservationDate, 'Reservierung');
+  add(oi.orderBookedDate || oi.orderPlacedDate, 'Bestellung aufgegeben');
+  const changes = hist?.changes || [];
+  const changed = (p) => changes.filter((c) => c.path === p);
+  const dw = changed('details.tasks.scheduling.deliveryWindowDisplay');
+  if (sch.deliveryWindowDisplay && !dw.length) add(oi.orderBookedDate || oi.orderPlacedDate, 'Lieferzeitraum', sch.deliveryWindowDisplay);
+  if (dw.length && dw[0].before) add(hist.firstAt, 'Lieferzeitraum', dw[0].before);
+  for (const c of dw) add(c.at, 'Lieferzeitraum', c.after || 'entfernt');
+  if (reg.expectedRegDate && !changed('details.tasks.registration.expectedRegDate').length) add(reg.expectedRegDate, 'Voraussichtliche Zulassung');
+  for (const c of changed('details.tasks.registration.expectedRegDate')) add(c.after || c.at, 'Voraussichtliche Zulassung', c.after ? '' : 'entfernt');
+  if (fp.etaToDeliveryCenter && !changed('details.tasks.finalPayment.data.etaToDeliveryCenter').length) add(fp.etaToDeliveryCenter, 'Ankunft im Lieferzentrum (ETA)');
+  for (const c of changed('details.tasks.finalPayment.data.etaToDeliveryCenter')) add(c.after || c.at, 'Ankunft im Lieferzentrum (ETA)', c.after ? '' : 'entfernt');
+  const appt = appointmentOf(t);
+  if (appt) add(appt, 'Auslieferungstermin');
+  for (const c of changed('order.vin')) if (c.after) add(c.at, 'FIN zugewiesen');
+  for (const c of changed('order.orderStatus')) add(c.at, 'Bestellstatus', c.after);
+  const odo = changed('details.tasks.registration.orderDetails.vehicleOdometer').find((c) => c.after != null && c.after !== '');
+  if (odo) add(odo.at, 'Fahrzeug gebaut (Kilometerstand erschienen)');
+  for (const c of changed('details.tasks.registration.orderDetails.vehicleRoutingLocation')) add(c.at, 'Abholort geändert', c.after);
+  items.sort((a, b) => (parseIso(a.ts)?.d ?? 0) - (parseIso(b.ts)?.d ?? 0));
+  const seen = new Set();
+  return items.map((i) => { const again = seen.has(i.key); seen.add(i.key); return { ...i, again }; });
 }
 
 // ---------- Darstellung ----------
+const DELIVERY_TYPE = { PICKUP_SERVICE_CENTER: 'Abholung im Service-Center', HOME_DELIVERY: 'Lieferung nach Hause', DIRECT: 'Direktlieferung' };
+const STEP_NAMES = { registration: 'Registrierung', financing: 'Zahlungsart', scheduling: 'Liefertermin', insurance: 'Versicherung', finalPayment: 'Schlusszahlung', agreements: 'Verträge', deliveryAcceptance: 'Übergabe' };
+
 function steps(tasks) {
   return Object.entries(tasks)
     .filter(([, t]) => t && t.required !== false && t.order != null)
@@ -202,77 +275,152 @@ function steps(tasks) {
       const parts = [];
       if (cardTitle && cardTitle !== title) parts.push(cardTitle);
       if (detail && detail !== cardTitle) parts.push(detail);
-      return `<div class="step ${cls}">
-        <div class="dot">${done ? '✓' : ''}</div>
-        <div><div class="step-title">${esc(title)}</div>
-        ${parts.length ? `<div class="step-sub">${esc(parts.join(' · '))}</div>` : ''}</div>
-      </div>`;
+      return `<div class="step ${cls}"><div class="dot">${done ? '✓' : ''}</div>
+        <div><div class="step-title">${esc(title)}</div>${parts.length ? `<div class="step-sub">${esc(parts.join(' · '))}</div>` : ''}</div></div>`;
     }).join('');
 }
 
-function render(entry) {
-  const { referenceNumber, details, meta, account, error } = entry;
-  if (!details) {
-    return `<div class="card error"><strong>${secret(referenceNumber)}</strong><p>${esc(error || 'Keine Daten')}</p></div>`;
-  }
-  const t = details.tasks ?? {};
-  const vin = pick(account ?? {}, 'vin') ?? pick(meta ?? {}, 'vin', 'vehicleVin')
-    ?? pick(t, 'insurance.vin', 'insurance.insuredVIN', 'insurance.teslavin');
-  const vinShows = meta?.vinShows;
-  const vinText = vin ?? (vinShows === false ? 'von Tesla noch nicht freigegeben' : 'noch nicht zugewiesen');
-  const dType = pick(t, 'scheduling.deliveryType', 'deliveryAcceptance.deliveryType');
-  const due = pick(t, 'finalPayment.amountDue');
-  const sent = pick(t, 'finalPayment.amountSent');
-  const cur = pick(t, 'finalPayment.currencyFormat.currencyCode');
-  const appt = pick(t, 'scheduling.apptDateTimeAddressStr');
+function configSection(options) {
+  if (!options.length) return '';
+  const groups = new Map();
+  for (const o of options) { const k = o.cat || null; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(o); }
+  const order = [...CATEGORY_ORDER, ...[...groups.keys()].filter((k) => !CATEGORY_ORDER.includes(k))];
+  const html = order.filter((k) => groups.has(k)).map((k) => `
+    <div class="opt-cat">${esc(k ? (CATEGORY_NAMES[k] || k) : 'Nicht zugeordnet')}</div>
+    ${groups.get(k).map((o) => `<div class="opt"><span class="mono code">${esc(o.code)}</span><span>${o.label ? esc(o.label) : '<span class="empty">unbekannter Code</span>'}</span></div>`).join('')}`).join('');
+  return `<div class="card"><h2>Konfiguration</h2>${html}</div>`;
+}
 
-  const rows = [
-    row('Referenz', secret(referenceNumber), '', true),
-    vin ? row('VIN', secret(vin), '', true) : row('VIN', vinText, 'empty'),
+function render(entry, hist) {
+  const { referenceNumber, details, meta, account, error } = entry;
+  if (!details) return `<div class="card error"><strong>${secret(referenceNumber)}</strong><p>${esc(error || 'Keine Daten')}</p></div>`;
+  const acc = account ?? {};
+  const t = details.tasks ?? {};
+  const reg = t.registration ?? {}, oi = reg.orderDetails ?? {}, fp = t.finalPayment?.data ?? {}, sch = t.scheduling ?? {};
+  const cur = pick(t, 'finalPayment.currencyFormat.currencyCode') || pick(fp, 'currencyCode') || 'EUR';
+  const options = decodeOptions(acc.mktOptions);
+  const cfg = summarizeConfig(options);
+  const vin = pick(acc, 'vin') ?? pick(meta ?? {}, 'vin', 'vehicleVin') ?? pick(t, 'deliveryDetails.regData.orderDetails.vin', 'registration.orderDetails.vin', 'finalPayment.data.vin', 'insurance.vin');
+  const vinText = vin ? null : (meta?.vinShows === false ? 'noch nicht zugewiesen (Tesla zeigt sie noch nicht)' : 'noch nicht zugewiesen');
+  const appt = appointmentOf(t);
+  const dType = pick(t, 'scheduling.deliveryType', 'deliveryAcceptance.deliveryType');
+  const odometer = oi.vehicleOdometer;
+  const odoShown = odometer != null && odometer !== '' && Number(odometer) !== 30;
+  const routingId = oi.vehicleRoutingLocation;
+  const loc = routingId != null ? LOCATIONS?.[String(routingId)] : null;
+
+  const headline = appt ? fmtDate(appt) : (sch.deliveryWindowDisplay || 'Noch kein Lieferzeitraum');
+  const headlineLabel = appt ? 'Auslieferungstermin' : 'Voraussichtlicher Lieferzeitraum';
+  const modelLine = [cfg.model, cfg.paint, cfg.interior].filter(Boolean).join(' / ') || pick(t, 'deliveryAcceptance.model') || acc.modelCode || 'Tesla';
+
+  const orderRows = [
+    row('Auftragsnummer', secret(referenceNumber), '', true),
+    row('Bestellstatus', acc.orderStatus ?? details.orderStatus),
+    vin ? row('FIN', secret(vin), '', true) : row('FIN', vinText, 'empty'),
+    row('Modellcode', acc.modelCode, 'mono'),
+    row('Reservierungsdatum', fmtDate(oi.reservationDate)),
+    row('Bestelldatum', fmtDate(oi.orderBookedDate || oi.orderPlacedDate)),
     row('Motornummer', pick(meta ?? {}, 'motorNumber'), 'mono'),
-    row('Lieferart', DELIVERY_TYPE[dType] ?? dType),
-    row('Übergabeort', pick(t, 'scheduling.deliveryAddressTitle')),
-    row('Termin', appt ?? 'noch nicht vereinbart', appt ? '' : 'empty'),
-    row('Offener Betrag', money(due, cur)),
-    sent ? row('Bezahlt', money(sent, cur)) : '',
-    row('Land', pick(t, 'registration.country', 'agreements.countryCode')),
+    row('FIN in der Tesla-App sichtbar', yesNo(meta?.vinShows)),
+    row('Land', pick(t, 'registration.country', 'agreements.countryCode') || acc.countryCode),
   ].join('');
+
+  const vehicleRows = [
+    odoShown ? row('Kilometerstand', `${odometer} ${oi.vehicleOdometerType || ''}`.trim()) : '',
+    row('Fahrzeug bereit', yesNo(pick(t, 'deliveryAcceptance.vehicleIsReady'))),
+    row('Zulassungsstatus', oi.registrationStatus),
+    row('Voraussichtliches Zulassungsdatum', fmtDate(reg.expectedRegDate)),
+  ].join('');
+
+  const locHtml = loc ? `${esc(loc.n)} <span class="muted">(${esc(routingId)})</span><br><span class="muted">${esc([loc.a, [loc.z, loc.ci].filter(Boolean).join(' '), loc.co].filter(Boolean).join(', '))}${loc.p ? ' · ' + esc(loc.p) : ''}</span>` : null;
+  const deliveryRows = [
+    locHtml ? row('Abholort', locHtml, '', true) : (routingId != null ? row('Abholort (ID)', String(routingId)) : ''),
+    row('Auslieferungszentrum', sch.deliveryAddressTitle),
+    row('Ankunft im Lieferzentrum (ETA)', fmtDate(fp.etaToDeliveryCenter)),
+    row('Auslieferungstermin', appt ? fmtDate(appt) : 'noch nicht vereinbart', appt ? '' : 'empty'),
+    row('Lieferzeitraum', sch.deliveryWindowDisplay),
+    row('Lieferart', DELIVERY_TYPE[dType] ?? dType),
+  ].join('');
+
+  const fin = fp.financingDetails ?? {};
+  const tfd = fin.teslaFinanceDetails ?? {};
+  const pay = Array.isArray(fp.paymentDetails) ? fp.paymentDetails : [];
+  const isCash = fin.orderType === 'CASH' || !fp.financingIntent;
+  const paymentRows = (isCash ? [
+    row('Zahlungsart', fin.orderType ? (fin.orderType === 'CASH' ? 'Barkauf' : fin.orderType) : (fp.financingIntent ? null : 'Barkauf')),
+    ...pay.map((p, i) => row(pay.length > 1 ? `Zahlung ${i + 1}` : 'Gezahlter Betrag', [money(p.amountPaid, cur), p.paymentType, fmtDate(p.paymentDate || p.date)].filter(Boolean).join(' · '))),
+    row('Kontostand', money(fp.accountBalance, cur)),
+    row('Offener Betrag', money(fp.amountDue ?? pick(t, 'finalPayment.amountDue'), cur)),
+    row('Nach Rückerstattung fällig', money(fp.amountDueAfterRefund, cur)),
+  ] : [
+    row('Zahlungsart', 'Finanzierung'),
+    row('Finanzierungsprodukt', fin.financialProductType),
+    row('Finanzierungspartner', tfd.financePartnerName),
+    row('Monatliche Rate', money(tfd.monthlyPayment, cur)),
+    row('Vertragslaufzeit (Monate)', tfd.termsInMonths),
+    row('Zinssatz', tfd.interestRate != null ? `${tfd.interestRate} %` : null),
+    row('Laufleistung pro Jahr', tfd.mileage),
+    row('Finanzierter Betrag', money(fp.amountDueFinancier, cur)),
+    row('Genehmigter Betrag', money(tfd.approvedLoanAmount, cur)),
+    row('Offener Betrag', money(fp.amountDue ?? pick(t, 'finalPayment.amountDue'), cur)),
+  ]).join('');
+  const paymentStatus = row('Zahlungsstatus', pick(t, 'finalPayment.status'));
+
+  const tl = timelineOf(entry, hist);
+  const tlHtml = tl.length ? tl.map((i) => `<div class="tl"><span class="tl-date">${esc(fmtDate(i.ts) ?? '?')}</span><span>${i.again ? '<span class="muted">neu: </span>' : ''}${esc(i.key)}${i.value ? `: <b>${esc(i.value)}</b>` : ''}</span></div>`).join('') : '<p class="empty">Noch keine Verlaufsdaten.</p>';
 
   return `
     <div class="card">
-      <div class="model">${esc(pick(t, 'deliveryAcceptance.model') ?? 'Tesla')}</div>
-      <div class="window">${esc(pick(t, 'scheduling.deliveryWindowDisplay') ?? 'Noch kein Liefertermin')}</div>
-      <div class="window-label">Voraussichtliches Lieferfenster</div>
-      <dl>${rows}</dl>
+      <div class="model">${esc(modelLine)}</div>
+      <div class="window">${esc(headline)}</div>
+      <div class="window-label">${esc(headlineLabel)}${acc.orderStatus ? ` · <span class="badge">${esc(acc.orderStatus)}</span>` : ''}</div>
+      <h2 class="sub">Bestelldetails</h2><dl>${orderRows}</dl>
     </div>
-    <div class="card">
-      <h2>Bestellschritte</h2>
-      ${steps(t)}
-    </div>
+    ${configSection(options)}
+    ${vehicleRows ? `<div class="card"><h2>Fahrzeugstatus</h2><dl class="plain">${vehicleRows}</dl></div>` : ''}
+    <div class="card"><h2>Auslieferung</h2><dl class="plain">${deliveryRows}</dl></div>
+    <div class="card"><h2>Zahlung &amp; Finanzierung</h2><dl class="plain">${paymentRows}${paymentStatus}</dl></div>
+    <div class="card"><h2>Bestellverlauf</h2>${tlHtml}</div>
+    <div class="card"><h2>Bestellschritte</h2>${steps(t)}</div>
     <div class="card" id="hist-${esc(referenceNumber)}"></div>
-    <details>
-      <summary>Komplette Tesla-Antwort anzeigen</summary>
-      <pre>${esc(JSON.stringify({ meta, details }, null, 2))}</pre>
-    </details>`;
+    <details><summary>Komplette Tesla-Antwort anzeigen</summary><pre>${esc(JSON.stringify({ account: acc, meta, details }, null, 2))}</pre></details>`;
 }
 
-function show(data, cached) {
+function renderHistory(hist) {
+  for (const [rn, h] of Object.entries(hist)) {
+    const box = document.getElementById('hist-' + rn);
+    if (!box) continue;
+    const changes = (h.changes || []).slice().reverse();
+    if (!changes.length) {
+      box.innerHTML = `<h2>Änderungen</h2><p class="empty">Keine Änderungen seit ${esc(fmtDate(h.firstAt) ?? '')}. Jeder Abruf in diesem Browser wird mit dem vorherigen verglichen, wie bei TOST.</p>`;
+      continue;
+    }
+    const groups = [];
+    for (const c of changes) { const g = groups[groups.length - 1]; if (g && g.at === c.at) g.items.push(c); else groups.push({ at: c.at, items: [c] }); }
+    box.innerHTML = '<h2>Änderungen</h2>' + groups.slice(0, 30).map((g) => `
+      <div class="chg"><div class="chg-when">${esc(fmtDate(g.at) ?? g.at)}</div>
+        ${g.items.map((c) => `<div><b>${esc(pathLabel(c.path))}</b>: ${fmtChangeValue(c.path, c.before)} <span class="arrow">→</span> ${fmtChangeValue(c.path, c.after)}</div>`).join('')}
+      </div>`).join('');
+  }
+}
+
+async function show(data, cached) {
+  await loadOptionCodes();
+  if ((data.orders || []).some((o) => pick(o, 'details.tasks.registration.orderDetails.vehicleRoutingLocation') != null)) await loadLocations();
+  const hist = store.get(HISTORY_KEY) || {};
   out.innerHTML = data.orders?.length
-    ? data.orders.map(render).join('')
+    ? data.orders.map((o) => render(o, hist[o.referenceNumber])).join('')
     : '<div class="card"><p class="empty">Keine Bestellungen gefunden.</p></div>';
-  renderHistory(store.get(HISTORY_KEY) || {});
+  renderHistory(hist);
   const when = new Date(data.fetchedAt).toLocaleString(LOCALE);
-  meta.textContent = cached ? `Zwischengespeicherte Daten von ${when}` : `Abgerufen ${when}`;
+  metaEl.textContent = cached ? `Zwischengespeicherte Daten von ${when}` : `Abgerufen ${when}`;
 }
 
 async function load(force = false) {
   btn.disabled = true;
   try {
     const cached = store.get(CACHE_KEY);
-    if (!force && cached && Date.now() - cached.at < CACHE_MS) {
-      show(cached.data, true);
-      return;
-    }
+    if (!force && cached && Date.now() - cached.at < CACHE_MS) { await show(cached.data, true); return; }
     const res = await fetch('/api/orders');
     const data = await res.json().catch(() => ({}));
     if (res.status === 401) {
@@ -286,11 +434,10 @@ async function load(force = false) {
     if (!res.ok) throw new Error(data.message || data.error || `HTTP ${res.status}`);
     store.set(CACHE_KEY, { at: Date.now(), data });
     recordHistory(data);
-    show(data, false);
+    await show(data, false);
   } catch (err) {
-    out.innerHTML = `<div class="card error"><strong>Fehler</strong><p>${esc(err.message)}</p>
-      <p><a href="/tesla-login.html">Tesla-Konto erneut verbinden</a></p></div>`;
-    meta.textContent = '';
+    out.innerHTML = `<div class="card error"><strong>Fehler</strong><p>${esc(err.message)}</p><p><a href="/tesla-login.html">Tesla-Konto erneut verbinden</a></p></div>`;
+    metaEl.textContent = '';
   } finally {
     btn.disabled = false;
   }
