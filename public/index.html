@@ -291,6 +291,41 @@ function configSection(options) {
   return `<div class="card"><h2>Konfiguration</h2>${html}</div>`;
 }
 
+// ---------- Alle Felder (wie TOST --all): jede nicht-leere Angabe aus der Tesla-Antwort ----------
+const GROUP_NAMES = { registration: 'Registrierung', financing: 'Zahlungsart', scheduling: 'Liefertermin', insurance: 'Versicherung',
+  finalPayment: 'Schlusszahlung', agreements: 'Verträge', deliveryAcceptance: 'Übergabe', deliveryDetails: 'Lieferdetails', tradeIn: 'Inzahlungnahme',
+  carbonCredit: 'Umweltbonus', chargingInstall: 'Ladeinstallation', orderDetails: 'Bestelldaten' };
+const SKIP_IN_ALL = /(^|\.)(strings|translations)(\.|$)/;
+function fmtAnyValue(path, v) {
+  if (typeof v === 'boolean') return v ? 'ja' : 'nein';
+  if (typeof v === 'number') return esc(String(v));
+  const s = String(v);
+  if (/vin$/i.test(path) && /^[A-HJ-NPR-Z0-9]{17}$/.test(s)) return secret(s);
+  if (parseIso(s) && /\d{4}-\d{2}-\d{2}/.test(s)) return esc(fmtDate(s));
+  return esc(s.length > 300 ? s.slice(0, 300) + '…' : s);
+}
+function allDataSection(entry) {
+  const groups = [];
+  const push = (name, obj, base) => {
+    if (!obj || typeof obj !== 'object') return;
+    const rows = Object.entries(flatten(obj, '', {}))
+      .filter(([k, v]) => v !== null && v !== '' && v !== '[]' && v !== '{}' && !SKIP_IN_ALL.test(k))
+      .map(([k, v]) => `<dt title="${esc(base + k)}">${esc(PATH_LABELS[base + k] || k)}</dt><dd>${fmtAnyValue(k, v)}</dd>`);
+    if (rows.length) groups.push({ name, rows });
+  };
+  push('Konto-Übersicht (owner-api)', entry.account, 'order.');
+  push('Bestellung (/order)', entry.meta, 'meta.');
+  const tasks = entry.details?.tasks ?? {};
+  for (const [k, v] of Object.entries(tasks)) push(GROUP_NAMES[k] || k, v, `details.tasks.${k}.`);
+  const rest = { ...(entry.details ?? {}) }; delete rest.tasks;
+  push('Weitere Felder', rest, 'details.');
+  const total = groups.reduce((n, g) => n + g.rows.length, 0);
+  return `<div class="card"><h2>Alle Daten von Tesla <span class="muted">(${total} Felder)</span></h2>
+    <p class="muted">Jede nicht-leere Angabe aus der Tesla-Antwort, wie TOST mit „--all“. Fahre mit der Maus über einen Namen, um den technischen Pfad zu sehen.</p>
+    ${groups.map((g) => `<details open class="grp"><summary>${esc(g.name)} <span class="muted">(${g.rows.length})</span></summary><dl class="plain all">${g.rows.join('')}</dl></details>`).join('')}
+  </div>`;
+}
+
 function render(entry, hist) {
   const { referenceNumber, details, meta, account, error } = entry;
   if (!details) return `<div class="card error"><strong>${secret(referenceNumber)}</strong><p>${esc(error || 'Keine Daten')}</p></div>`;
@@ -383,7 +418,9 @@ function render(entry, hist) {
     <div class="card"><h2>Bestellverlauf</h2>${tlHtml}</div>
     <div class="card"><h2>Bestellschritte</h2>${steps(t)}</div>
     <div class="card" id="hist-${esc(referenceNumber)}"></div>
-    <details><summary>Komplette Tesla-Antwort anzeigen</summary><pre>${esc(JSON.stringify({ account: acc, meta, details }, null, 2))}</pre></details>`;
+    ${entry.metaError ? `<p class="muted">Hinweis: Die Abfrage /order (FIN-Freigabe, Motornummer) war nicht möglich: ${esc(entry.metaError)}</p>` : ''}
+    ${allDataSection(entry)}
+    <details><summary>Komplette Tesla-Antwort als JSON anzeigen</summary><pre>${esc(JSON.stringify({ account: acc, meta, details }, null, 2))}</pre></details>`;
 }
 
 function renderHistory(hist) {
@@ -408,9 +445,12 @@ async function show(data, cached) {
   await loadOptionCodes();
   if ((data.orders || []).some((o) => pick(o, 'details.tasks.registration.orderDetails.vehicleRoutingLocation') != null)) await loadLocations();
   const hist = store.get(HISTORY_KEY) || {};
-  out.innerHTML = data.orders?.length
+  const notice = data.accountError
+    ? `<div class="card error"><strong>Hinweis</strong><p>Die Konto-Übersicht (owner-api) konnte nicht geladen werden, daher fehlen Bestellstatus, Modellcode und Konfiguration: ${esc(data.accountError)}</p></div>`
+    : '';
+  out.innerHTML = notice + (data.orders?.length
     ? data.orders.map((o) => render(o, hist[o.referenceNumber])).join('')
-    : '<div class="card"><p class="empty">Keine Bestellungen gefunden.</p></div>';
+    : '<div class="card"><p class="empty">Keine Bestellungen gefunden.</p></div>');
   renderHistory(hist);
   const when = new Date(data.fetchedAt).toLocaleString(LOCALE);
   metaEl.textContent = cached ? `Zwischengespeicherte Daten von ${when}` : `Abgerufen ${when}`;

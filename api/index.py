@@ -385,12 +385,13 @@ def build_url(base: str, reference_number: str) -> str:
 def fetch_everything(token: str) -> dict:
     # Konto-Übersicht: liefert die VIN sofort nach Zuweisung. Scheitert sie, geht es
     # ohne weiter (dann braucht es TESLA_ORDER_RN).
+    account_error = None
     try:
         account = tesla_get(ACCOUNT_ORDERS_URL, token).get("response") or []
     except TeslaError as err:
         if err.status == 401:
             raise
-        account = []
+        account, account_error = [], str(err)
     refs = [x.strip() for x in TESLA_ORDER_RN.split(",") if x.strip()] \
         or [o.get("referenceNumber") for o in account if o.get("referenceNumber")]
     if not refs:
@@ -400,18 +401,20 @@ def fetch_everything(token: str) -> dict:
         acc = next((o for o in account if o.get("referenceNumber") == rn), None)
         try:
             details = tesla_get(build_url(TASKS_URL, rn), token)
+            meta, meta_error = None, None
             try:
                 meta = tesla_get(build_url(ORDER_URL, rn), token)
             except TeslaError as err:
                 if err.status == 401:
                     raise
-                meta = None
-            orders.append({"referenceNumber": rn, "details": details, "meta": meta, "account": acc})
+                meta_error = str(err)
+            orders.append({"referenceNumber": rn, "details": details, "meta": meta, "account": acc, "metaError": meta_error})
         except TeslaError as err:
             if err.status == 401:
                 raise
             orders.append({"referenceNumber": rn, "details": None, "meta": None, "account": acc, "error": str(err)})
-    return {"fetchedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "orders": orders}
+    return {"fetchedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "orders": orders,
+            "accountError": account_error}
 
 
 @app.get("/api/orders")
