@@ -47,6 +47,10 @@ SCOPE = "openid email offline_access"
 TASKS_URL = "https://akamai-apigateway-vfx.tesla.com/tasks"
 ORDER_URL = "https://akamai-apigateway-vfx.tesla.com/order"
 ACCOUNT_ORDERS_URL = "https://owner-api.teslamotors.com/api/1/users/orders"
+# Weitere Endpunkte aus der Endpunktliste der Tesla-App (ownerapi_endpoints.json). Werden
+# nur zusätzlich abgefragt; scheitern sie, bleibt der Rest unberührt.
+VEHICLES_URL = "https://owner-api.teslamotors.com/api/1/vehicles"
+RESERVATION_DETAILS_URL = "https://owner-api.teslamotors.com/bff/v2/mobile-app/ownership/reservation-details/{rn}"
 APP_VERSION = "9.99.9-9999"  # absichtlich hoch: besteht die Mindestversions-Prüfung des Gateways
 USER_AGENT = "Tesla/4.55.5 (com.teslamotors.tesla; build:4193; Android 14)"
 X_USER_AGENT = "TeslaApp/4.55.5-4193/4193/android/14"
@@ -396,25 +400,33 @@ def fetch_everything(token: str) -> dict:
         or [o.get("referenceNumber") for o in account if o.get("referenceNumber")]
     if not refs:
         raise TeslaError("Keine Bestellung im Tesla-Konto gefunden. Falls es eine gibt: Referenznummer (RN…) als TESLA_ORDER_RN in Vercel hinterlegen.", 404)
+    def optional(url: str):
+        """Zusatzabfrage: (Daten, Fehlertext). 401 wird durchgereicht, alles andere nur gemeldet."""
+        try:
+            return tesla_get(url, token), None
+        except TeslaError as err:
+            if err.status == 401:
+                raise
+            return None, str(err)
+
+    vehicles, vehicles_error = optional(VEHICLES_URL)
+    if isinstance(vehicles, dict):
+        vehicles = vehicles.get("response")
     orders = []
     for rn in refs:
         acc = next((o for o in account if o.get("referenceNumber") == rn), None)
         try:
             details = tesla_get(build_url(TASKS_URL, rn), token)
-            meta, meta_error = None, None
-            try:
-                meta = tesla_get(build_url(ORDER_URL, rn), token)
-            except TeslaError as err:
-                if err.status == 401:
-                    raise
-                meta_error = str(err)
-            orders.append({"referenceNumber": rn, "details": details, "meta": meta, "account": acc, "metaError": meta_error})
+            meta, meta_error = optional(build_url(ORDER_URL, rn))
+            reservation, reservation_error = optional(RESERVATION_DETAILS_URL.format(rn=rn))
+            orders.append({"referenceNumber": rn, "details": details, "meta": meta, "account": acc, "metaError": meta_error,
+                           "extra": {"reservationDetails": reservation, "reservationDetailsError": reservation_error}})
         except TeslaError as err:
             if err.status == 401:
                 raise
             orders.append({"referenceNumber": rn, "details": None, "meta": None, "account": acc, "error": str(err)})
     return {"fetchedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "orders": orders,
-            "accountError": account_error}
+            "accountError": account_error, "vehicles": vehicles, "vehiclesError": vehicles_error}
 
 
 @app.get("/api/orders")
