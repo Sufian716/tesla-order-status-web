@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Anmelden – Tesla-Bestellstatus</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<main>
+  <h1>Tesla-Bestellstatus</h1>
+  <div class="card">
+    <h2>Anmelden</h2>
+    <form id="form">
+      <p><input type="password" id="password" placeholder="Passwort" autocomplete="current-password" autofocus required></p>
+      <p><button class="primary" type="submit" id="submit">Anmelden</button></p>
+      <p id="msg"></p>
+    </form>
+  </div>
+  <p class="muted">Das Passwort ist in den Vercel-Umgebungsvariablen hinterlegt (APP_PASSWORD), nicht im Code.</p>
+</main>
+<script>
+const form = document.getElementById('form');
+const msg = document.getElementById('msg');
+const submit = document.getElementById('submit');
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  submit.disabled = true;
+  msg.textContent = '';
+  try {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: document.getElementById('password').value }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || data.error || `HTTP ${res.status}`);
+    location.href = '/';
+  } catch (err) {
+    msg.textContent = err.message;
+    msg.className = 'err';
+    submit.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

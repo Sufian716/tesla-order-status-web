@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Meine Tesla-Bestellung</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>Meine Tesla-Bestellung</h1>
+    <div class="actions">
+      <button id="refresh">Aktualisieren</button>
+      <button id="tesla-logout" title="Tesla-Token aus diesem Browser löschen">Tesla trennen</button>
+      <button id="logout" title="Von dieser Seite abmelden">Abmelden</button>
+    </div>
+  </header>
+  <div id="out"><p class="empty">Lade …</p></div>
+  <footer id="meta"></footer>
+</main>
+
+<script>
+const out = document.getElementById('out');
+const meta = document.getElementById('meta');
+const btn = document.getElementById('refresh');
+const LOCALE = 'de-DE';
+const CACHE_KEY = 'tos.lastData';
+const HISTORY_KEY = 'tos.history';
+const CACHE_MS = 5 * 60 * 1000; // Tesla nicht bei jedem Reload anfragen
+
+const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+const pick = (obj, ...paths) => {
+  for (const p of paths) {
+    const v = p.split('.').reduce((o, k) => (o == null ? o : o[k]), obj);
+    if (v !== undefined && v !== null && v !== '') return v;
+  }
+  return null;
+};
+
+// localStorage kann fehlen (privater Modus): dann einfach ohne Cache/Historie weiterarbeiten.
+const store = {
+  get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+  del(k) { try { localStorage.removeItem(k); } catch {} },
+};
+
+const DELIVERY_TYPE = {
+  PICKUP_SERVICE_CENTER: 'Abholung im Service-Center',
+  HOME_DELIVERY: 'Lieferung nach Hause',
+  DIRECT: 'Direktlieferung',
+};
+
+function money(amount, code) {
+  if (amount == null) return null;
+  try {
+    return new Intl.NumberFormat(LOCALE, { style:'currency', currency: code || 'EUR', maximumFractionDigits: 0 }).format(amount);
+  } catch {
+    return `${code || ''} ${amount}`.trim();
+  }
+}
+
+function row(label, value, cls = '', html = false) {
+  if (value === null) return '';
+  return `<dt>${esc(label)}</dt><dd class="${cls}">${html ? value : esc(value)}</dd>`;
+}
+
+// Referenznummer und VIN maskiert (RN1********), damit man Screenshots teilen kann.
+const mask = (s) => s.slice(0, 3) + '*'.repeat(Math.max(s.length - 3, 0));
+function secret(value) {
+  const v = String(value);
+  return `<span class="secret mono" data-v="${esc(v).replace(/"/g, '&quot;')}" title="Klicken zum Anzeigen">${esc(mask(v))}</span>`;
+}
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('.secret');
+  if (!el) return;
+  const shown = el.dataset.shown === '1';
+  el.textContent = shown ? mask(el.dataset.v) : el.dataset.v;
+  el.dataset.shown = shown ? '0' : '1';
+  el.title = shown ? 'Klicken zum Anzeigen' : 'Klicken zum Verbergen';
+});
+
+const STEP_NAMES = {
+  registration: 'Registrierung',
+  financing: 'Zahlungsart',
+  scheduling: 'Liefertermin',
+  insurance: 'Versicherung',
+  finalPayment: 'Schlusszahlung',
+  agreements: 'Verträge',
+  deliveryAcceptance: 'Übergabe',
+};
+
+// ---------- Änderungs-Historie (im Browser, localStorage) ----------
+const FIELDS = {
+  vin: 'VIN',
+  motorNumber: 'Motornummer',
+  vinShows: 'Tesla zeigt die VIN an',
+  deliveryWindow: 'Lieferfenster',
+  appointment: 'Übergabetermin',
+  deliveryType: 'Lieferart',
+  deliveryPlace: 'Übergabeort',
+  amountDue: 'Offener Betrag',
+  amountSent: 'Bezahlt',
+  vehicleIsReady: 'Fahrzeug bereit',
+  registration: 'Schritt: Registrierung',
+  financing: 'Schritt: Zahlungsart',
+  scheduling: 'Schritt: Liefertermin',
+  insurance: 'Schritt: Versicherung',
+  finalPayment: 'Schritt: Schlusszahlung',
+  agreements: 'Schritt: Verträge',
+  deliveryAcceptance: 'Schritt: Übergabe',
+};
+const STEP_KEYS = ['registration','financing','scheduling','insurance','finalPayment','agreements','deliveryAcceptance'];
+
+function stepState(t) {
+  if (!t) return null;
+  const state = t.complete === true ? 'erledigt' : t.enabled === true ? 'offen' : 'wartet';
+  const title = pick(t, 'card.title');
+  return title ? `${state} (${title})` : state;
+}
+
+function snapshot(entry) {
+  const t = entry?.details?.tasks ?? {};
+  const m = entry?.meta ?? {};
+  const s = {
+    vin: pick(entry?.account ?? {}, 'vin') ?? pick(m, 'vin', 'vehicleVin') ?? pick(t, 'insurance.vin', 'insurance.insuredVIN'),
+    motorNumber: pick(m, 'motorNumber'),
+    vinShows: m.vinShows ?? null,
+    deliveryWindow: pick(t, 'scheduling.deliveryWindowDisplay'),
+    appointment: pick(t, 'scheduling.apptDateTimeAddressStr', 'scheduling.deliveryAppointmentDate'),
+    deliveryType: pick(t, 'scheduling.deliveryType', 'deliveryAcceptance.deliveryType'),
+    deliveryPlace: pick(t, 'scheduling.deliveryAddressTitle'),
+    amountDue: pick(t, 'finalPayment.amountDue'),
+    amountSent: t?.finalPayment?.amountSent ?? null,
+    vehicleIsReady: t?.deliveryAcceptance?.vehicleIsReady ?? null,
+  };
+  for (const k of STEP_KEYS) s[k] = stepState(t[k]);
+  return s;
+}
+
+function diff(before, after) {
+  if (!before) return [];
+  return Object.keys(FIELDS)
+    .filter((k) => JSON.stringify(before[k] ?? null) !== JSON.stringify(after[k] ?? null))
+    .map((k) => ({ field: k, before: before[k] ?? null, after: after[k] ?? null }));
+}
+
+function recordHistory(data) {
+  const hist = store.get(HISTORY_KEY) || {};
+  for (const entry of data.orders || []) {
+    if (!entry.details) continue;
+    const rn = entry.referenceNumber;
+    const current = snapshot(entry);
+    const list = hist[rn] || [];
+    const previous = list.length ? list[list.length - 1].snapshot : null;
+    const changes = diff(previous, current);
+    if (!previous || changes.length) {
+      list.push({ at: data.fetchedAt, snapshot: current, changes });
+      hist[rn] = list.slice(-100);
+    }
+  }
+  store.set(HISTORY_KEY, hist);
+  return hist;
+}
+
+function renderHistory(hist) {
+  for (const [rn, entries] of Object.entries(hist)) {
+    const box = document.getElementById('hist-' + rn);
+    if (!box) continue;
+    const withChanges = entries.filter((e) => e.changes?.length).reverse();
+    if (!withChanges.length) {
+      const since = new Date(entries[0].at).toLocaleDateString(LOCALE);
+      box.innerHTML = `<h2>Änderungen</h2><p class="empty">Keine Änderungen seit ${esc(since)}. Jeder Abruf in diesem Browser wird verglichen.</p>`;
+      continue;
+    }
+    box.innerHTML = '<h2>Änderungen</h2>' + withChanges.slice(0, 12).map((e) => `
+      <div class="chg">
+        <div class="chg-when">${esc(new Date(e.at).toLocaleString(LOCALE))}</div>
+        ${e.changes.map((c) => {
+          const fmt = (v) => v == null || v === '' ? '(leer)' : c.field === 'vin' ? secret(v) : esc(v);
+          return `<div><b>${esc(FIELDS[c.field] ?? c.field)}</b>: ${fmt(c.before)} <span class="arrow">→</span> ${fmt(c.after)}</div>`;
+        }).join('')}
+      </div>`).join('');
+  }
+}
+
+// ---------- Darstellung ----------
+function steps(tasks) {
+  return Object.entries(tasks)
+    .filter(([, t]) => t && t.required !== false && t.order != null)
+    .sort((a, b) => a[1].order - b[1].order)
+    .map(([key, t]) => {
+      const done = t.complete === true;
+      const now = !done && t.enabled === true;
+      const cls = done ? 'done' : now ? 'now' : 'wait';
+      const title = STEP_NAMES[key] ?? key;
+      const cardTitle = pick(t, 'card.title');
+      const body = pick(t, 'card.subtitle', 'card.messageBody');
+      const detail = typeof body === 'number' ? money(body, pick(t, 'currencyFormat.currencyCode')) : body;
+      const parts = [];
+      if (cardTitle && cardTitle !== title) parts.push(cardTitle);
+      if (detail && detail !== cardTitle) parts.push(detail);
+      return `<div class="step ${cls}">
+        <div class="dot">${done ? '✓' : ''}</div>
+        <div><div class="step-title">${esc(title)}</div>
+        ${parts.length ? `<div class="step-sub">${esc(parts.join(' · '))}</div>` : ''}</div>
+      </div>`;
+    }).join('');
+}
+
+function render(entry) {
+  const { referenceNumber, details, meta, account, error } = entry;
+  if (!details) {
+    return `<div class="card error"><strong>${secret(referenceNumber)}</strong><p>${esc(error || 'Keine Daten')}</p></div>`;
+  }
+  const t = details.tasks ?? {};
+  const vin = pick(account ?? {}, 'vin') ?? pick(meta ?? {}, 'vin', 'vehicleVin')
+    ?? pick(t, 'insurance.vin', 'insurance.insuredVIN', 'insurance.teslavin');
+  const vinShows = meta?.vinShows;
+  const vinText = vin ?? (vinShows === false ? 'von Tesla noch nicht freigegeben' : 'noch nicht zugewiesen');
+  const dType = pick(t, 'scheduling.deliveryType', 'deliveryAcceptance.deliveryType');
+  const due = pick(t, 'finalPayment.amountDue');
+  const sent = pick(t, 'finalPayment.amountSent');
+  const cur = pick(t, 'finalPayment.currencyFormat.currencyCode');
+  const appt = pick(t, 'scheduling.apptDateTimeAddressStr');
+
+  const rows = [
+    row('Referenz', secret(referenceNumber), '', true),
+    vin ? row('VIN', secret(vin), '', true) : row('VIN', vinText, 'empty'),
+    row('Motornummer', pick(meta ?? {}, 'motorNumber'), 'mono'),
+    row('Lieferart', DELIVERY_TYPE[dType] ?? dType),
+    row('Übergabeort', pick(t, 'scheduling.deliveryAddressTitle')),
+    row('Termin', appt ?? 'noch nicht vereinbart', appt ? '' : 'empty'),
+    row('Offener Betrag', money(due, cur)),
+    sent ? row('Bezahlt', money(sent, cur)) : '',
+    row('Land', pick(t, 'registration.country', 'agreements.countryCode')),
+  ].join('');
+
+  return `
+    <div class="card">
+      <div class="model">${esc(pick(t, 'deliveryAcceptance.model') ?? 'Tesla')}</div>
+      <div class="window">${esc(pick(t, 'scheduling.deliveryWindowDisplay') ?? 'Noch kein Liefertermin')}</div>
+      <div class="window-label">Voraussichtliches Lieferfenster</div>
+      <dl>${rows}</dl>
+    </div>
+    <div class="card">
+      <h2>Bestellschritte</h2>
+      ${steps(t)}
+    </div>
+    <div class="card" id="hist-${esc(referenceNumber)}"></div>
+    <details>
+      <summary>Komplette Tesla-Antwort anzeigen</summary>
+      <pre>${esc(JSON.stringify({ meta, details }, null, 2))}</pre>
+    </details>`;
+}
+
+function show(data, cached) {
+  out.innerHTML = data.orders?.length
+    ? data.orders.map(render).join('')
+    : '<div class="card"><p class="empty">Keine Bestellungen gefunden.</p></div>';
+  renderHistory(store.get(HISTORY_KEY) || {});
+  const when = new Date(data.fetchedAt).toLocaleString(LOCALE);
+  meta.textContent = cached ? `Zwischengespeicherte Daten von ${when}` : `Abgerufen ${when}`;
+}
+
+async function load(force = false) {
+  btn.disabled = true;
+  try {
+    const cached = store.get(CACHE_KEY);
+    if (!force && cached && Date.now() - cached.at < CACHE_MS) {
+      show(cached.data, true);
+      return;
+    }
+    const res = await fetch('/api/orders');
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      if (data.error === 'app_login_required') { location.href = '/login.html'; return; }
+      if (data.error === 'tesla_login_required') { location.href = '/tesla-login.html'; return; }
+    }
+    if (!res.ok) throw new Error(data.message || data.error || `HTTP ${res.status}`);
+    store.set(CACHE_KEY, { at: Date.now(), data });
+    recordHistory(data);
+    show(data, false);
+  } catch (err) {
+    out.innerHTML = `<div class="card error"><strong>Fehler</strong><p>${esc(err.message)}</p>
+      <p><a href="/tesla-login.html">Tesla-Konto erneut verbinden</a></p></div>`;
+    meta.textContent = '';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+btn.addEventListener('click', () => load(true));
+document.getElementById('tesla-logout').addEventListener('click', async () => {
+  if (!confirm('Tesla-Token aus diesem Browser löschen? Danach ist ein erneuter Tesla-Login nötig.')) return;
+  await fetch('/api/tesla/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  store.del(CACHE_KEY);
+  location.href = '/tesla-login.html';
+});
+document.getElementById('logout').addEventListener('click', async () => {
+  await fetch('/api/auth/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  store.del(CACHE_KEY);
+  location.href = '/login.html';
+});
+load();
+</script>
+</body>
+</html>

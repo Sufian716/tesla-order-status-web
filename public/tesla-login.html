@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Tesla-Konto verbinden – Tesla-Bestellstatus</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>Tesla-Konto verbinden</h1>
+    <div class="actions"><a class="btn" href="/">Zurück</a></div>
+  </header>
+
+  <div class="card">
+    <h2>Schritt 1 – Tesla-Login öffnen</h2>
+    <p>Der Login findet direkt bei Tesla statt. Dein Tesla-Passwort wird hier nie eingegeben oder gespeichert.</p>
+    <p><button class="primary" id="start">Tesla-Login öffnen</button></p>
+    <div id="urlbox" class="urlbox muted" hidden>Falls sich kein neuer Tab öffnet, diesen Link benutzen:<br><a id="authlink" href="#" target="_blank" rel="noopener"></a></div>
+  </div>
+
+  <div class="card">
+    <h2>Schritt 2 – Weiterleitungs-Adresse einfügen</h2>
+    <p>Nach dem Login (inkl. 2FA) zeigt der Browser eine <b>Fehlerseite</b> wie „Seite nicht gefunden“
+       oder „Diese Website kann nicht erreicht werden“. <b>Das ist richtig so.</b></p>
+    <p>Kopiere die <b>komplette Adresse aus der Adressleiste</b> (sie beginnt mit
+       <code>tesla://auth/callback?code=…</code>) und füge sie hier ein. Der Code ist nur kurz gültig,
+       also direkt danach einfügen.</p>
+    <textarea id="input" placeholder="tesla://auth/callback?code=…&amp;state=…"></textarea>
+    <p><button class="primary" id="finish">Verbindung abschließen</button></p>
+    <p id="msg"></p>
+    <details>
+      <summary>Die Adressleiste zeigt keine tesla://-Adresse?</summary>
+      <ol>
+        <li>Am PC die Entwicklertools öffnen (F12), Reiter „Netzwerk“/„Network“, dort „Protokoll beibehalten“/„Preserve log“ aktivieren.</li>
+        <li>Schritt 1 erneut ausführen und einloggen.</li>
+        <li>In der Netzwerk-Liste den Eintrag „callback“ suchen, Rechtsklick → Adresse kopieren und oben einfügen.</li>
+        <li>Es reicht auch, nur den Wert hinter <code>code=</code> einzufügen.</li>
+      </ol>
+    </details>
+  </div>
+
+  <p class="muted">Das Tesla-Zugriffs-Token wird verschlüsselt nur in einem Cookie dieses Browsers gespeichert, nicht auf dem Server.
+     Es verlängert sich automatisch. „Tesla trennen“ im Dashboard löscht es wieder.</p>
+</main>
+
+<script>
+const startBtn = document.getElementById('start');
+const finishBtn = document.getElementById('finish');
+const input = document.getElementById('input');
+const msg = document.getElementById('msg');
+const urlbox = document.getElementById('urlbox');
+const authlink = document.getElementById('authlink');
+
+function say(text, cls) { msg.textContent = text; msg.className = cls || ''; }
+function handleAuth(res, data) {
+  if (res.status === 401 && data.error === 'app_login_required') { location.href = '/login.html'; return true; }
+  return false;
+}
+
+startBtn.addEventListener('click', async () => {
+  startBtn.disabled = true;
+  say('');
+  try {
+    const res = await fetch('/api/tesla/login/start');
+    const data = await res.json().catch(() => ({}));
+    if (handleAuth(res, data)) return;
+    if (!res.ok) throw new Error(data.message || data.error || `HTTP ${res.status}`);
+    authlink.href = data.url;
+    authlink.textContent = data.url;
+    urlbox.hidden = false;
+    window.open(data.url, '_blank', 'noopener');
+    say('Tesla-Login geöffnet. Nach dem Login die Adresse der Fehlerseite unten einfügen.', 'muted');
+  } catch (err) {
+    say('Fehler: ' + err.message, 'err');
+  } finally {
+    startBtn.disabled = false;
+  }
+});
+
+finishBtn.addEventListener('click', async () => {
+  const value = input.value.trim();
+  if (!value) return say('Bitte zuerst die Weiterleitungs-Adresse einfügen.', 'err');
+  finishBtn.disabled = true;
+  say('Token wird bei Tesla eingetauscht …', 'muted');
+  try {
+    const res = await fetch('/api/tesla/login/finish', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: value }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (handleAuth(res, data)) return;
+    if (!res.ok) throw new Error(data.message || data.error || `HTTP ${res.status}`);
+    say('Verbunden. Weiter zum Dashboard …', 'ok');
+    setTimeout(() => { location.href = '/'; }, 800);
+  } catch (err) {
+    say('Fehler: ' + err.message, 'err');
+    finishBtn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
