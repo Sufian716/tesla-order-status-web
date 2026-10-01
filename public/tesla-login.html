@@ -20,7 +20,8 @@
   <div class="card">
     <h2>Schritt 1 – Tesla-Login öffnen</h2>
     <p>Der Login findet direkt bei Tesla statt. Dein Tesla-Passwort wird hier nie eingegeben oder gespeichert.
-       Am besten am <b>PC oder Laptop</b>: auf einem Handy mit installierter Tesla-App fängt die App den Rückweg ab.</p>
+       Am besten am <b>PC oder Laptop</b>, am einfachsten mit <b>Firefox</b>. Auf einem Handy mit installierter
+       Tesla-App fängt die App den Rückweg ab.</p>
     <p>
       <a id="start" class="btn primary" href="#" target="_blank" rel="noopener">Tesla-Login öffnen</a>
       <button id="renew" title="Neuen Login-Link erzeugen">Link neu erzeugen</button>
@@ -29,25 +30,26 @@
   </div>
 
   <div class="card">
-    <h2>Schritt 2 – Weiterleitungs-Adresse einfügen</h2>
-    <p>Nach dem Login (inkl. 2FA) zeigt der Browser eine <b>Fehlerseite</b> wie „Seite nicht gefunden“
-       oder eine leere Seite. <b>Das ist richtig so.</b></p>
-    <p>Kopiere die <b>komplette Adresse aus der Adressleiste</b>. Sie beginnt mit
-       <code>tesla://auth/callback?code=…</code> und enthält <code>code=</code> und <code>state=</code>.
-       Bitte die ganze Adresse einfügen, nicht nur einen Teil. Der Code ist nur wenige Minuten gültig,
-       also direkt danach einfügen.</p>
+    <h2>Schritt 2 – Rückleitungs-Adresse holen und einfügen</h2>
+    <p>Nach dem Login will Tesla auf <code>tesla://auth/callback?code=…</code> weiterleiten. Ohne Tesla-App
+       auf dem PC passiert dann oft <b>nichts Sichtbares</b>: die Seite bleibt leer oder stehen. Das ist normal,
+       die Adresse mit dem Code ist trotzdem da. So kommst du dran:</p>
+    <p><b>Chrome oder Edge</b> (Entwicklertools, eine Minute):</p>
+    <ol>
+      <li>Im Tesla-Tab <b>F12</b> drücken und oben den Reiter <b>„Netzwerk“ / „Network“</b> wählen.</li>
+      <li>Das Kästchen <b>„Protokoll beibehalten“ / „Preserve log“</b> anhaken.</li>
+      <li>Jetzt bei Tesla anmelden (E-Mail, Passwort, 2FA).</li>
+      <li>Im Filterfeld der Netzwerk-Liste <code>callback</code> eintippen. Der Eintrag <b>callback</b> erscheint.</li>
+      <li>Rechtsklick darauf → <b>Kopieren → Linkadresse kopieren</b> („Copy → Copy link address“) und unten einfügen.</li>
+    </ol>
+    <p><b>Firefox</b> geht ohne Entwicklertools: Nach dem Login zeigt Firefox eine Fehlerseite („Die Adresse wurde
+       nicht verstanden“), und in der Adressleiste steht die <code>tesla://…</code>-Adresse. Komplett kopieren und einfügen.</p>
+    <p class="muted">Schon angemeldet, aber kein „callback“-Eintrag? Oben „Link neu erzeugen“ klicken und den Login wiederholen,
+       diesmal mit geöffneten Entwicklertools und „Protokoll beibehalten“, <b>bevor</b> du dich anmeldest.
+       Es reicht auch, nur den Wert hinter <code>code=</code> einzufügen.</p>
     <textarea id="input" placeholder="tesla://auth/callback?code=…&amp;state=…"></textarea>
     <p><button class="primary" id="finish">Verbindung abschließen</button></p>
     <p id="msg"></p>
-    <details>
-      <summary>Die Adressleiste zeigt keine tesla://-Adresse?</summary>
-      <ol>
-        <li>Am PC die Entwicklertools öffnen (F12), Reiter „Netzwerk“/„Network“, dort „Protokoll beibehalten“/„Preserve log“ aktivieren.</li>
-        <li>Schritt 1 erneut ausführen und einloggen.</li>
-        <li>In der Netzwerk-Liste den Eintrag „callback“ suchen, Rechtsklick → Adresse kopieren und oben einfügen.</li>
-        <li>Es reicht auch, nur den Wert hinter <code>code=</code> einzufügen.</li>
-      </ol>
-    </details>
   </div>
 
   <p class="muted">Das Tesla-Zugriffs-Token wird verschlüsselt nur in einem Cookie dieses Browsers gespeichert, nicht auf dem Server.
