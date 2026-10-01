@@ -263,6 +263,61 @@ function timelineOf(entry, hist) {
   return items.map((i) => { const again = seen.has(i.key); seen.add(i.key); return { ...i, again }; });
 }
 
+// ---------- FIN-Decoder (Tesla-Schema: Werk, Modell, Modelljahr, Seriennummer) ----------
+const WMI = { XP7: 'Gigafactory Berlin-Brandenburg (Grünheide)', LRW: 'Gigafactory Shanghai', '5YJ': 'Fremont (USA)', '7SA': 'Gigafactory Texas (Austin)', '7G2': 'Tesla (USA)' };
+const PLANT = { B: 'Berlin-Brandenburg', C: 'Shanghai', F: 'Fremont', A: 'Austin', P: 'Palo Alto', N: 'Reno' };
+const VIN_MODEL = { S: 'Model S', '3': 'Model 3', X: 'Model X', Y: 'Model Y', C: 'Cybertruck', R: 'Roadster' };
+function decodeVin(vin) {
+  if (typeof vin !== 'string' || vin.length !== 17) return null;
+  const v = vin.toUpperCase();
+  const yearChar = v[9];
+  const years = { P: 2023, R: 2024, S: 2025, T: 2026, V: 2027, W: 2028, X: 2029, Y: 2030, N: 2022, M: 2021, L: 2020, K: 2019, J: 2018, H: 2017, G: 2016 };
+  return {
+    factory: WMI[v.slice(0, 3)] ?? null,
+    model: VIN_MODEL[v[3]] ?? null,
+    year: years[yearChar] ?? null,
+    plant: PLANT[v[10]] ?? null,
+    serial: v.slice(11),
+  };
+}
+
+// ---------- Produktionsstatus: aus den Signalen der Tesla-Daten abgeleitet ----------
+// Tesla gibt keinen Fertigungsstand heraus. Die Community (TOST, TMC, TFF) liest ihn aus
+// diesen Signalen ab; die Reihenfolge entspricht dem üblichen Ablauf.
+function productionStages(entry, hist) {
+  const acc = entry.account ?? {}, t = entry.details?.tasks ?? {}, meta = entry.meta ?? {};
+  const reg = t.registration ?? {}, oi = reg.orderDetails ?? {}, fp = t.finalPayment?.data ?? {}, sch = t.scheduling ?? {};
+  const changes = hist?.changes || [];
+  const firstChange = (p) => changes.find((c) => c.path === p && c.after != null && c.after !== '')?.at ?? null;
+  const vin = acc.vin ?? pick(meta, 'vin') ?? pick(t, 'deliveryDetails.regData.orderDetails.vin', 'registration.orderDetails.vin', 'finalPayment.data.vin');
+  const odo = oi.vehicleOdometer;
+  const built = odo != null && odo !== '' && Number(odo) !== 30;
+  const appt = appointmentOf(t);
+  const stages = [
+    { name: 'Bestellung aufgegeben', done: true, when: oi.orderBookedDate || oi.orderPlacedDate,
+      signal: 'Bestelldatum aus der Registrierung.' },
+    { name: 'Zahlungsart / Finanzierung bestätigt', done: t.financing?.complete === true, when: null,
+      signal: t.financing?.complete ? 'Schritt „Zahlungsart“ ist abgeschlossen.' : 'Wird erledigt, sobald der Schritt „Zahlungsart“ in der App abgeschlossen ist.' },
+    { name: 'Zulassungsdaten eingereicht', done: Boolean(reg.regData?.startedOn) || reg.complete === true, when: reg.regData?.startedOn,
+      signal: reg.complete ? 'Registrierung abgeschlossen.' : (reg.card?.title ? `Tesla meldet: „${reg.card.title}“.` : 'Noch nicht begonnen.') },
+    { name: 'FIN zugeteilt (Fahrzeug zugeordnet)', done: Boolean(vin), when: firstChange('order.vin'),
+      signal: vin ? 'Die FIN steht in der Konto-Übersicht (owner-api), meist Tage bevor die App sie zeigt.' : 'Erstes starkes Signal. Erscheint in der Konto-Übersicht, bevor die Tesla-App sie anzeigt. Bei Grünheide-Fahrzeugen laut Forum oft kurz vor oder mit der Produktion, typischerweise 1–3 Wochen vor Beginn des Lieferfensters.' },
+    { name: 'Fahrzeug gebaut', done: built, when: firstChange('details.tasks.registration.orderDetails.vehicleOdometer'),
+      signal: built ? `Kilometerstand ${odo} ${oi.vehicleOdometerType || ''} vorhanden, das Fahrzeug existiert physisch.` : 'Signal: Ein echter Kilometerstand erscheint (TOST nennt das „CAR BUILT“). Der Platzhalter 30 zählt nicht.' },
+    { name: 'Transport zum Lieferzentrum', done: Boolean(fp.etaToDeliveryCenter) || (built && oi.vehicleRoutingLocation != null), when: fp.etaToDeliveryCenter,
+      signal: fp.etaToDeliveryCenter ? `Ankunft im Lieferzentrum laut Tesla: ${fmtDate(fp.etaToDeliveryCenter)}.` : 'Signal: Feld „Ankunft im Lieferzentrum (ETA)“ wird befüllt, Abholort bekommt eine Routing-Nummer. Grünheide → Lieferzentrum dauert laut TFF-Forum meist 5–7 Tage.' },
+    { name: 'Zulassung durch Tesla abgeschlossen', done: sch.isRegComplete === true, when: null,
+      signal: sch.isRegComplete ? 'Tesla meldet die Zulassung als abgeschlossen.' : 'Signal: „Zulassung abgeschlossen“ springt auf ja, das Lieferzentrum hat die Papiere.' },
+    { name: 'Übergabetermin', done: Boolean(appt), when: appt,
+      signal: appt ? 'Termin ist gesetzt.' : (sch.isSelfSchedulingAvailable ? 'Termin kann jetzt selbst gebucht werden (Link unter „Status im Detail“).' : 'Signal: „Termin selbst buchbar“ wird ja, dann meldet sich auch die App.') },
+    { name: 'Übergabe', done: t.deliveryAcceptance?.complete === true, when: null,
+      signal: t.deliveryAcceptance?.complete ? 'Abgeschlossen. Viel Spaß!' : 'Schritt „Übergabe“ in der App.' },
+  ];
+  let currentSet = false;
+  for (const st of stages) { if (!st.done && !currentSet) { st.current = true; currentSet = true; } }
+  return { stages, vin, vehicleMapId: acc.vehicleMapId ?? null, substatus: acc.orderSubstatus ?? null };
+}
+
 // ---------- Darstellung ----------
 const DELIVERY_TYPE = { PICKUP_SERVICE_CENTER: 'Abholung im Service-Center', HOME_DELIVERY: 'Lieferung nach Hause', DIRECT: 'Direktlieferung' };
 const STEP_NAMES = { registration: 'Registrierung', financing: 'Zahlungsart', scheduling: 'Liefertermin', insurance: 'Versicherung', finalPayment: 'Schlusszahlung', agreements: 'Verträge', deliveryAcceptance: 'Übergabe' };
@@ -332,6 +387,24 @@ function allDataSection(entry) {
   return `<div class="card"><h2>Alle Daten von Tesla <span class="muted">(${total} Felder)</span></h2>
     <p class="muted">Jede nicht-leere Angabe aus der Tesla-Antwort, wie TOST mit „--all“. Fahre mit der Maus über einen Namen, um den technischen Pfad zu sehen.</p>
     ${groups.map((g) => `<details open class="grp"><summary>${esc(g.name)} <span class="muted">(${g.rows.length})</span></summary><dl class="plain all">${g.rows.join('')}</dl></details>`).join('')}
+  </div>`;
+}
+
+function productionSection(entry, hist) {
+  const { stages, vin, vehicleMapId, substatus } = productionStages(entry, hist);
+  const list = stages.map((st) => `<div class="step ${st.done ? 'done' : st.current ? 'now' : 'wait'}"><div class="dot">${st.done ? '\u2713' : ''}</div>
+    <div><div class="step-title">${esc(st.name)}${st.when ? ` <span class="muted">· ${esc(fmtDate(st.when))}</span>` : ''}${st.current ? ' <span class="badge">aktueller Schritt</span>' : ''}</div>
+    <div class="step-sub">${esc(st.signal)}</div></div></div>`).join('');
+  const d = decodeVin(vin);
+  const vinHtml = d ? `<dl class="plain" style="margin-top:14px">${row('Werk (aus FIN)', d.factory ?? d.plant)}${row('Modell (aus FIN)', d.model)}${row('Modelljahr (aus FIN)', d.year)}${row('Seriennummer', d.serial, 'mono')}</dl>` : '';
+  const notes = [];
+  if (vehicleMapId != null) notes.push(`<b>Fahrzeug-Map-ID ${esc(vehicleMapId)}</b>: Ein Tesla-naher Nutzer im TMC-Forum beschreibt diese ID als Beleg, dass der Bestellung ein gebautes Fahrzeug zugeordnet ist. Ob das für jede Bestellung gilt, ist nicht belegt. Beobachte, ob sich die ID ändert, Änderungen landen in der Historie.`);
+  if (substatus) notes.push(`<b>Unterstatus ${esc(substatus)}</b>: ${substatus === '_Z' ? 'Nicht offiziell dokumentiert. Im US-Forum als Übergangsstatus rund um die Qualitätsprüfung beschrieben, in britischen und australischen Foren haben aber auch frische Bestellungen ohne FIN diesen Wert. Vermutlich Standardwert, erst ein Wechsel ist interessant.' : 'Nicht offiziell dokumentiert; ein Wechsel wird in der Historie festgehalten.'}`);
+  return `<div class="card"><h2>Produktionsstatus <span class="muted">(aus Signalen abgeleitet)</span></h2>
+    <p class="muted">Tesla gibt den Fertigungsstand nicht heraus. Die Community liest ihn aus diesen Signalen ab; die Reihenfolge entspricht dem üblichen Ablauf bei Grünheide-Fahrzeugen.</p>
+    ${list}${vinHtml}${notes.length ? `<div class="notes">${notes.map((n) => `<p class="muted">${n}</p>`).join('')}</div>` : ''}
+    <p class="muted">Vergleich mit anderen Bestellungen: <a href="https://tff-order-stats.de/" target="_blank" rel="noopener">TFF Order Stats</a> (Bestell-, FIN- und Lieferdaten anderer Kunden) und das
+    <a href="https://tff-forum.de/c/tesla-model-y/model-y-bestellungen/105" target="_blank" rel="noopener">TFF-Forum „Model Y Bestellungen“</a>.</p>
   </div>`;
 }
 
@@ -455,6 +528,7 @@ function render(entry, hist) {
     ${configSection(options)}
     ${vehicleRows ? `<div class="card"><h2>Fahrzeugstatus</h2><dl class="plain">${vehicleRows}</dl></div>` : ''}
     <div class="card"><h2>Auslieferung</h2><dl class="plain">${deliveryRows}</dl></div>
+    ${productionSection(entry, hist)}
     <div class="card"><h2>Status im Detail</h2><dl class="plain">${statusRows}</dl>${tipsHtml}</div>
     <div class="card"><h2>Zahlung &amp; Finanzierung</h2><dl class="plain">${paymentRows}${paymentStatus}</dl></div>
     <div class="card"><h2>Bestellverlauf</h2>${tlHtml}</div>

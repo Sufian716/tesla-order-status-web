@@ -89,3 +89,5 @@ dl.all { grid-template-columns:minmax(120px, max-content) 1fr; gap:5px 16px; mar
 dl.all dt { overflow-wrap:anywhere; cursor:help; }
 .tip { padding:8px 0; border-bottom:1px solid var(--border); font-size:14px; }
 .tip:last-child { border-bottom:0; }
+.notes { margin-top:12px; border-top:1px solid var(--border); padding-top:8px; }
+.notes p { font-size:13px; }
