@@ -277,7 +277,11 @@ async function load(force = false) {
     const data = await res.json().catch(() => ({}));
     if (res.status === 401) {
       if (data.error === 'app_login_required') { location.href = '/login.html'; return; }
-      if (data.error === 'tesla_login_required') { location.href = '/tesla-login.html'; return; }
+      if (data.error === 'tesla_login_required') {
+        try { if (data.message) sessionStorage.setItem('tos.handoff', 'Tesla-Verbindung muss erneuert werden: ' + data.message); } catch {}
+        location.href = '/tesla-login.html';
+        return;
+      }
     }
     if (!res.ok) throw new Error(data.message || data.error || `HTTP ${res.status}`);
     store.set(CACHE_KEY, { at: Date.now(), data });

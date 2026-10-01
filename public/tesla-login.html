@@ -11,22 +11,29 @@
 <main>
   <header>
     <h1>Tesla-Konto verbinden</h1>
-    <div class="actions"><a class="btn" href="/">Zurück</a></div>
+    <div class="actions"><a class="btn" href="/">Zum Dashboard</a></div>
   </header>
+
+  <div id="handoff" class="card error" hidden><strong>Hinweis</strong><p id="handoff-msg"></p></div>
+  <p id="status" class="muted">Status wird geprüft …</p>
 
   <div class="card">
     <h2>Schritt 1 – Tesla-Login öffnen</h2>
-    <p>Der Login findet direkt bei Tesla statt. Dein Tesla-Passwort wird hier nie eingegeben oder gespeichert.</p>
-    <p><button class="primary" id="start">Tesla-Login öffnen</button></p>
-    <div id="urlbox" class="urlbox muted" hidden>Falls sich kein neuer Tab öffnet, diesen Link benutzen:<br><a id="authlink" href="#" target="_blank" rel="noopener"></a></div>
+    <p>Der Login findet direkt bei Tesla statt. Dein Tesla-Passwort wird hier nie eingegeben oder gespeichert.
+       Am besten am <b>PC oder Laptop</b>: auf einem Handy mit installierter Tesla-App fängt die App den Rückweg ab.</p>
+    <p>
+      <a id="start" class="btn primary" href="#" target="_blank" rel="noopener">Tesla-Login öffnen</a>
+      <button id="renew" title="Neuen Login-Link erzeugen">Link neu erzeugen</button>
+    </p>
+    <div id="urlbox" class="urlbox muted" hidden>Falls sich kein neuer Tab öffnet, diesen Link kopieren und im Browser öffnen:<br><a id="authlink" href="#" target="_blank" rel="noopener"></a></div>
   </div>
 
   <div class="card">
     <h2>Schritt 2 – Weiterleitungs-Adresse einfügen</h2>
     <p>Nach dem Login (inkl. 2FA) zeigt der Browser eine <b>Fehlerseite</b> wie „Seite nicht gefunden“
-       oder „Diese Website kann nicht erreicht werden“. <b>Das ist richtig so.</b></p>
-    <p>Kopiere die <b>komplette Adresse aus der Adressleiste</b> (sie beginnt mit
-       <code>tesla://auth/callback?code=…</code>) und füge sie hier ein. Der Code ist nur kurz gültig,
+       oder eine leere Seite. <b>Das ist richtig so.</b></p>
+    <p>Kopiere die <b>komplette Adresse aus der Adressleiste</b>. Sie beginnt mit
+       <code>tesla://auth/callback?code=…</code>. Der Code ist nur wenige Minuten gültig,
        also direkt danach einfügen.</p>
     <textarea id="input" placeholder="tesla://auth/callback?code=…&amp;state=…"></textarea>
     <p><button class="primary" id="finish">Verbindung abschließen</button></p>
@@ -47,10 +54,12 @@
 </main>
 
 <script>
-const startBtn = document.getElementById('start');
+const start = document.getElementById('start');
+const renew = document.getElementById('renew');
 const finishBtn = document.getElementById('finish');
 const input = document.getElementById('input');
 const msg = document.getElementById('msg');
+const status = document.getElementById('status');
 const urlbox = document.getElementById('urlbox');
 const authlink = document.getElementById('authlink');
 
@@ -60,29 +69,66 @@ function handleAuth(res, data) {
   return false;
 }
 
-startBtn.addEventListener('click', async () => {
-  startBtn.disabled = true;
-  say('');
+// Vom Dashboard übergebene Meldung (z. B. Tesla hat das Token abgelehnt) anzeigen.
+try {
+  const handoff = sessionStorage.getItem('tos.handoff');
+  if (handoff) {
+    sessionStorage.removeItem('tos.handoff');
+    document.getElementById('handoff-msg').textContent = handoff;
+    document.getElementById('handoff').hidden = false;
+  }
+} catch {}
+
+async function showStatus() {
+  try {
+    const res = await fetch('/api/session');
+    const data = await res.json().catch(() => ({}));
+    if (handleAuth(res, data)) return;
+    status.innerHTML = data.tesla
+      ? 'Tesla-Konto ist in diesem Browser bereits verbunden. <a href="/">Zum Dashboard</a>. Erneut verbinden ersetzt die Verbindung.'
+      : 'Noch kein Tesla-Konto in diesem Browser verbunden.';
+  } catch {
+    status.textContent = '';
+  }
+}
+
+// Login-Link vorab holen: der Klick ist dann eine normale Navigation, kein Popup (Popup-Blocker greifen nicht).
+async function prepare() {
+  start.setAttribute('href', '#');
+  renew.disabled = true;
   try {
     const res = await fetch('/api/tesla/login/start');
     const data = await res.json().catch(() => ({}));
     if (handleAuth(res, data)) return;
     if (!res.ok) throw new Error(data.message || data.error || `HTTP ${res.status}`);
+    start.setAttribute('href', data.url);
     authlink.href = data.url;
     authlink.textContent = data.url;
     urlbox.hidden = false;
-    window.open(data.url, '_blank', 'noopener');
-    say('Tesla-Login geöffnet. Nach dem Login die Adresse der Fehlerseite unten einfügen.', 'muted');
+    say('');
   } catch (err) {
-    say('Fehler: ' + err.message, 'err');
+    say('Login-Link konnte nicht erzeugt werden: ' + err.message, 'err');
   } finally {
-    startBtn.disabled = false;
+    renew.disabled = false;
   }
+}
+
+start.addEventListener('click', (e) => {
+  if (start.getAttribute('href') === '#') {
+    e.preventDefault();
+    say('Der Login-Link wird noch erzeugt, bitte kurz warten.', 'muted');
+    return;
+  }
+  say('Tesla-Login geöffnet. Nach dem Login die Adresse der Fehlerseite unten einfügen.', 'muted');
 });
+renew.addEventListener('click', prepare);
 
 finishBtn.addEventListener('click', async () => {
   const value = input.value.trim();
   if (!value) return say('Bitte zuerst die Weiterleitungs-Adresse einfügen.', 'err');
+  if (/auth\.tesla\.com\/oauth2\/v3\/authorize/.test(value)) {
+    return say('Das ist der Login-Link aus Schritt 1. Gesucht ist die Adresse NACH dem Login, sie beginnt mit tesla://auth/callback?code=…', 'err');
+  }
   finishBtn.disabled = true;
   say('Token wird bei Tesla eingetauscht …', 'muted');
   try {
@@ -93,6 +139,7 @@ finishBtn.addEventListener('click', async () => {
     const data = await res.json().catch(() => ({}));
     if (handleAuth(res, data)) return;
     if (!res.ok) throw new Error(data.message || data.error || `HTTP ${res.status}`);
+    try { localStorage.removeItem('tos.lastData'); } catch {}
     say('Verbunden. Weiter zum Dashboard …', 'ok');
     setTimeout(() => { location.href = '/'; }, 800);
   } catch (err) {
@@ -100,6 +147,8 @@ finishBtn.addEventListener('click', async () => {
     finishBtn.disabled = false;
   }
 });
+
+showStatus().then(prepare);
 </script>
 </body>
 </html>
