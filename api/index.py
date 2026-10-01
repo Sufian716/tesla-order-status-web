@@ -281,10 +281,15 @@ def tesla_login_finish():
         return jsonify(error="state_mismatch", message="Die Adresse gehört zu einem anderen Login-Versuch. Bitte Schritt 1 erneut ausführen."), 400
     if hmac.compare_digest(code, pkce["s"]):
         return jsonify(error="state_not_code", message="Das ist der state-Wert aus dem Login-Link, nicht der Code. Bitte erst bei Tesla anmelden und danach die komplette Adresse der Fehlerseite einfügen (sie enthält code=… und state=…)."), 400
+    elapsed = int(time.time() - float(pkce.get("at", 0)))
     try:
         tokens = exchange_code(code, pkce["v"])
     except TeslaError as err:
-        return jsonify(error="tesla_error", message=str(err)), err.status
+        hint = ""
+        if "invalid_auth_code" in str(err):
+            hint = (f" – Zeit zwischen Schritt 1 und jetzt: {elapsed} s. Tesla-Codes verfallen nach kurzer Zeit und gelten nur einmal:"
+                    " „Link neu erzeugen“ klicken, Login wiederholen und die Adresse sofort einfügen.")
+        return jsonify(error="tesla_error", message=str(err) + hint, elapsed=elapsed), err.status
     resp = jsonify(ok=True)
     set_chunked(resp, TESLA_COOKIE, seal("tesla", tokens), TESLA_COOKIE_DAYS * 86400)
     _del_cookie(resp, PKCE_COOKIE)
