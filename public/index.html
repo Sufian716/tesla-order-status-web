@@ -14,9 +14,16 @@
     <div class="actions">
       <button id="refresh">Aktualisieren</button>
       <button id="tesla-logout" title="Tesla-Token aus diesem Browser löschen">Tesla trennen</button>
+      <button id="diag" title="Feldliste ohne persönliche Daten zum Weitergeben">Diagnose kopieren</button>
       <button id="logout" title="Von dieser Seite abmelden">Abmelden</button>
     </div>
   </header>
+  <div id="diagbox" class="card" hidden>
+    <h2>Diagnose <span class="muted">(Feldnamen, Datumsangaben und Status, keine persönlichen Daten)</span></h2>
+    <p id="diagmsg" class="muted"></p>
+    <textarea id="diagtext" readonly style="min-height:220px"></textarea>
+    <p><button id="diagclose">Schließen</button></p>
+  </div>
   <div id="out"><p class="empty">Lade …</p></div>
   <footer id="meta"></footer>
 </main>
@@ -482,6 +489,36 @@ async function load(force = false) {
     btn.disabled = false;
   }
 }
+
+// ---------- Diagnose: Feldliste ohne persönliche Daten ----------
+const SAFE_PATH = /(date|time|eta|window|status|type|country|currency|model|code|complete|enabled|required|order\b|version|language|locale|title|subtitle|count|amount|balance|payment|financ|interest|term|mileage|odometer|routing|vinShows|motor|delivery|appointment|readiness|match|category|option|product|partner)/i;
+function diagnose(data) {
+  const lines = [`Abruf: ${data.fetchedAt}`, `Bestellungen: ${(data.orders || []).length}`, `Konto-Übersicht Fehler: ${data.accountError || 'keiner'}`];
+  for (const o of data.orders || []) {
+    lines.push('', `=== Bestellung ${mask(String(o.referenceNumber))} ===`, `/order Fehler: ${o.metaError || 'keiner'}`, `Fehler: ${o.error || 'keiner'}`);
+    const flat = flatten({ order: o.account ?? {}, meta: o.meta ?? {}, details: o.details ?? {} }, '', {});
+    for (const [k, v] of Object.entries(flat).sort(([a], [b]) => a.localeCompare(b))) {
+      if (v === null || v === '' || v === '[]' || v === '{}' || SKIP_IN_ALL.test(k)) continue;
+      let shown;
+      if (/vin$/i.test(k) && typeof v === 'string') shown = mask(v);
+      else if (typeof v !== 'string') shown = String(v);
+      else if (SAFE_PATH.test(k)) shown = v.length > 120 ? v.slice(0, 120) + '…' : v;
+      else shown = `(Text, ${v.length} Zeichen)`;
+      lines.push(`${k} = ${shown}`);
+    }
+  }
+  return lines.join('\n');
+}
+document.getElementById('diag').addEventListener('click', async () => {
+  const cached = store.get(CACHE_KEY);
+  const box = document.getElementById('diagbox'), ta = document.getElementById('diagtext'), m = document.getElementById('diagmsg');
+  if (!cached?.data) { m.textContent = 'Noch keine Daten geladen.'; box.hidden = false; return; }
+  ta.value = diagnose(cached.data);
+  box.hidden = false;
+  try { await navigator.clipboard.writeText(ta.value); m.textContent = 'In die Zwischenablage kopiert. Einfach einfügen und abschicken.'; }
+  catch { m.textContent = 'Text unten markieren und kopieren.'; ta.select(); }
+});
+document.getElementById('diagclose').addEventListener('click', () => { document.getElementById('diagbox').hidden = true; });
 
 btn.addEventListener('click', () => load(true));
 document.getElementById('tesla-logout').addEventListener('click', async () => {
