@@ -353,7 +353,7 @@ function render(entry, hist) {
   const routingId = oi.vehicleRoutingLocation;
   const loc = routingId != null ? LOCATIONS?.[String(routingId)] : null;
 
-  const headline = appt ? fmtDate(appt) : (sch.deliveryWindowDisplay || 'Noch kein Lieferzeitraum');
+  const headline = appt ? fmtDate(appt) : (sch.deliveryWindowDisplay || pick(t, 'scheduling.card.messageBody') || 'Noch kein Lieferzeitraum');
   const headlineLabel = appt ? 'Auslieferungstermin' : 'Voraussichtlicher Lieferzeitraum';
   const modelLine = [cfg.model, cfg.paint, cfg.interior].filter(Boolean).join(' / ') || pick(t, 'deliveryAcceptance.model') || acc.modelCode || 'Tesla';
 
@@ -410,6 +410,38 @@ function render(entry, hist) {
   ]).join('');
   const paymentStatus = row('Zahlungsstatus', pick(t, 'finalPayment.status'));
 
+  const ORDER_TYPES = { TESLA_LENDING: 'Finanzierung über Tesla', CASH: 'Barkauf', LEASE: 'Leasing', TESLA_LEASING: 'Leasing über Tesla', LOAN: 'Finanzierung', THIRD_PARTY: 'Fremdfinanzierung' };
+  const CUSTOMER_TYPES = { PRIVATE: 'Privatkunde', BUSINESS: 'Geschäftskunde', COMPANY: 'Firma' };
+  const REGISTRANT = { COMPANY: 'Firma', PRIVATE: 'Privatperson', INDIVIDUAL: 'Privatperson' };
+  const TITLE_STATUS = { NEW: 'Neufahrzeug', USED: 'Gebrauchtfahrzeug' };
+  const REG_STEPS = { REG_TYPE: 'Zulassungsart', REG_DETAILS: 'Zulassungsdaten', REG_DOCUMENTS: 'Dokumente', REG_COMPLETE: 'abgeschlossen' };
+  const regData = reg.regData ?? {};
+  const carousel = Array.isArray(meta?.carouselMessages) ? meta.carouselMessages : [];
+  const statusRows = [
+    row('Bestellstatus', acc.orderStatus ? `${acc.orderStatus}${acc.orderSubstatus ? ' (' + acc.orderSubstatus + ')' : ''}` : null),
+    row('Fahrzeug-Map-ID', acc.vehicleMapId, 'mono'),
+    row('Bestellart', ORDER_TYPES[reg.orderType] ?? reg.orderType),
+    row('Kundentyp', CUSTOMER_TYPES[reg.customerType ?? meta?.customerType] ?? (reg.customerType ?? meta?.customerType)),
+    row('Fahrzeugstatus', TITLE_STATUS[sch.vehicleTitleStatus] ?? sch.vehicleTitleStatus),
+    row('Fahrzeug zugeordnet (Lagerfahrzeug/Match)', yesNo(sch.isInventoryOrMatched)),
+    row('FIN in der Tesla-App sichtbar', yesNo(meta?.vinShows)),
+    row('Zulassung: aktueller Schritt', REG_STEPS[reg.currentStep] ?? reg.currentStep),
+    row('Zulassung auf', REGISTRANT[regData.registrantType] ?? regData.registrantType),
+    row('Zulassung begonnen am', fmtDate(regData.startedOn)),
+    row('Zulassung durch Tesla', yesNo(regData.isTeslaRegister ?? pick(regData, 'regDetails.isTeslaRegister'))),
+    row('Zulassung abgeschlossen', yesNo(sch.isRegComplete)),
+    row('Lieferschätzung aktiv', yesNo(sch.isDeliveryEstimatesEnabled)),
+    row('Auslieferung mehr als 2 Wochen entfernt', yesNo(sch.isMoreThanTwoWeeks)),
+    row('Termin selbst buchbar', yesNo(sch.isSelfSchedulingAvailable)),
+    row('Umbuchung möglich', yesNo(sch.isEligibleForReschedule)),
+    row('Gültiger Termin vorhanden', yesNo(sch.isValidAppointment)),
+    row('Inzahlungnahme', pick(t, 'tradeIn.tradeInIntent') === 'No' ? 'keine' : (pick(t, 'tradeIn.status') ?? pick(t, 'tradeIn.card.subtitle'))),
+    row('Zahlung bestätigt', yesNo(meta?.hasConfirmedOrderPrice)),
+    sch.selfSchedulingUrl ? row('Terminbuchung', `<a href="${esc(sch.selfSchedulingUrl)}" target="_blank" rel="noopener">Bei Tesla öffnen</a>`, '', true) : '',
+    meta?.accountUrl ? row('Tesla-Bestellseite', `<a href="${esc(meta.accountUrl)}" target="_blank" rel="noopener">tesla.com öffnen</a>`, '', true) : '',
+  ].join('');
+  const tipsHtml = carousel.length ? `<h2 class="sub">Hinweise von Tesla</h2>${carousel.map((c) => `<div class="tip"><b>${esc(c.header ?? c.title ?? '')}</b>${c.description ? `<div class="muted">${esc(c.description)}</div>` : ''}</div>`).join('')}` : '';
+
   const tl = timelineOf(entry, hist);
   const tlHtml = tl.length ? tl.map((i) => `<div class="tl"><span class="tl-date">${esc(fmtDate(i.ts) ?? '?')}</span><span>${i.again ? '<span class="muted">neu: </span>' : ''}${esc(i.key)}${i.value ? `: <b>${esc(i.value)}</b>` : ''}</span></div>`).join('') : '<p class="empty">Noch keine Verlaufsdaten.</p>';
 
@@ -423,6 +455,7 @@ function render(entry, hist) {
     ${configSection(options)}
     ${vehicleRows ? `<div class="card"><h2>Fahrzeugstatus</h2><dl class="plain">${vehicleRows}</dl></div>` : ''}
     <div class="card"><h2>Auslieferung</h2><dl class="plain">${deliveryRows}</dl></div>
+    <div class="card"><h2>Status im Detail</h2><dl class="plain">${statusRows}</dl>${tipsHtml}</div>
     <div class="card"><h2>Zahlung &amp; Finanzierung</h2><dl class="plain">${paymentRows}${paymentStatus}</dl></div>
     <div class="card"><h2>Bestellverlauf</h2>${tlHtml}</div>
     <div class="card"><h2>Bestellschritte</h2>${steps(t)}</div>
@@ -497,7 +530,9 @@ async function load(force = false) {
 }
 
 // ---------- Diagnose: Feldliste ohne persönliche Daten ----------
-const SAFE_PATH = /(date|time|eta|window|status|type|country|currency|model|code|complete|enabled|required|order\b|version|language|locale|title|subtitle|count|amount|balance|payment|financ|interest|term|mileage|odometer|routing|vinShows|motor|delivery|appointment|readiness|match|category|option|product|partner)/i;
+const PERSONAL_PATH = /(firstName|lastName|userName|fullName|\.name$|email|phone|mobile|address|street|city|zip|postal|iban|bic|birth|tax|license|plate|company|owner\.|registeredUser|customerName|contact)/i;
+const SAFE_KEY = /(date|time|^eta|window|status|type|country|currency|model|code|complete|enabled|required|^order|version|language|locale|title|subtitle|messageBody|messageTitle|count|amount|balance|payment|financ|interest|term|mileage|odometer|routing|vinShows|motor|delivery|appointment|readiness|match|category|option|product|partner|intent|step|url|id$|^is[A-Z]|^has[A-Z]|^should[A-Z]|^can[A-Z]|header|description)/i;
+const ENUM_LIKE = /^[A-Z0-9_ .:-]{1,40}$/;
 function diagnose(data) {
   const lines = [`Abruf: ${data.fetchedAt}`, `Bestellungen: ${(data.orders || []).length}`, `Konto-Übersicht Fehler: ${data.accountError || 'keiner'}`,
     `Fahrzeuge im Konto: ${Array.isArray(data.vehicles) ? data.vehicles.length : 'n/a'} (Fehler: ${data.vehiclesError || 'keiner'})`];
@@ -508,9 +543,11 @@ function diagnose(data) {
     for (const [k, v] of Object.entries(flat).sort(([a], [b]) => a.localeCompare(b))) {
       if (v === null || v === '' || v === '[]' || v === '{}' || SKIP_IN_ALL.test(k)) continue;
       let shown;
+      const key = k.split('.').pop();
       if (/vin$/i.test(k) && typeof v === 'string') shown = mask(v);
       else if (typeof v !== 'string') shown = String(v);
-      else if (SAFE_PATH.test(k)) shown = v.length > 120 ? v.slice(0, 120) + '…' : v;
+      else if (PERSONAL_PATH.test(k)) shown = `(persönlich, ${v.length} Zeichen)`;
+      else if (SAFE_KEY.test(key) || ENUM_LIKE.test(v) || parseIso(v)) shown = v.length > 120 ? v.slice(0, 120) + '…' : v;
       else shown = `(Text, ${v.length} Zeichen)`;
       lines.push(`${k} = ${shown}`);
     }
