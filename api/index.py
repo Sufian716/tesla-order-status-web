@@ -20,7 +20,7 @@ import secrets
 import time
 import uuid
 from datetime import datetime, timezone
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from curl_cffi import requests as tls_requests
@@ -62,6 +62,28 @@ CHUNK = 3500  # Browser-Limit ~4096 Byte pro Cookie
 
 PUBLIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "public")
 app = Flask(__name__, static_folder=PUBLIC_DIR, static_url_path="")
+
+
+class _VercelPathFix:
+    """Vercel schreibt /api/<rest> auf /api/index?__path=<rest> um (vercel.json) und reicht der
+    Function den umgeschriebenen Pfad weiter. Hier wird der Original-Pfad wiederhergestellt,
+    damit die Flask-Routen (/api/auth/login, /api/orders, …) greifen."""
+
+    def __init__(self, wsgi_app):
+        self.wsgi_app = wsgi_app
+
+    def __call__(self, environ, start_response):
+        query = environ.get("QUERY_STRING", "")
+        if "__path=" in query:
+            params = parse_qsl(query, keep_blank_values=True)
+            original = next((v for k, v in params if k == "__path"), None)
+            if original is not None:
+                environ["PATH_INFO"] = "/api/" + original.strip("/")
+                environ["QUERY_STRING"] = urlencode([(k, v) for k, v in params if k != "__path"])
+        return self.wsgi_app(environ, start_response)
+
+
+app.wsgi_app = _VercelPathFix(app.wsgi_app)
 
 
 class TeslaError(Exception):
