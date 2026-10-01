@@ -279,6 +279,8 @@ def tesla_login_finish():
         return jsonify(error="pkce_expired", message="Die Login-Sitzung ist abgelaufen. Bitte Schritt 1 erneut ausführen und direkt danach die Adresse einfügen."), 400
     if state and not hmac.compare_digest(state, pkce["s"]):
         return jsonify(error="state_mismatch", message="Die Adresse gehört zu einem anderen Login-Versuch. Bitte Schritt 1 erneut ausführen."), 400
+    if hmac.compare_digest(code, pkce["s"]):
+        return jsonify(error="state_not_code", message="Das ist der state-Wert aus dem Login-Link, nicht der Code. Bitte erst bei Tesla anmelden und danach die komplette Adresse der Fehlerseite einfügen (sie enthält code=… und state=…)."), 400
     try:
         tokens = exchange_code(code, pkce["v"])
     except TeslaError as err:

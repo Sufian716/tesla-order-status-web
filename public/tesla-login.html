@@ -33,7 +33,8 @@
     <p>Nach dem Login (inkl. 2FA) zeigt der Browser eine <b>Fehlerseite</b> wie „Seite nicht gefunden“
        oder eine leere Seite. <b>Das ist richtig so.</b></p>
     <p>Kopiere die <b>komplette Adresse aus der Adressleiste</b>. Sie beginnt mit
-       <code>tesla://auth/callback?code=…</code>. Der Code ist nur wenige Minuten gültig,
+       <code>tesla://auth/callback?code=…</code> und enthält <code>code=</code> und <code>state=</code>.
+       Bitte die ganze Adresse einfügen, nicht nur einen Teil. Der Code ist nur wenige Minuten gültig,
        also direkt danach einfügen.</p>
     <textarea id="input" placeholder="tesla://auth/callback?code=…&amp;state=…"></textarea>
     <p><button class="primary" id="finish">Verbindung abschließen</button></p>
@@ -62,6 +63,7 @@ const msg = document.getElementById('msg');
 const status = document.getElementById('status');
 const urlbox = document.getElementById('urlbox');
 const authlink = document.getElementById('authlink');
+let lastState = null;
 
 function say(text, cls) { msg.textContent = text; msg.className = cls || ''; }
 function handleAuth(res, data) {
@@ -102,6 +104,7 @@ async function prepare() {
     if (handleAuth(res, data)) return;
     if (!res.ok) throw new Error(data.message || data.error || `HTTP ${res.status}`);
     start.setAttribute('href', data.url);
+    lastState = data.state || null;
     authlink.href = data.url;
     authlink.textContent = data.url;
     urlbox.hidden = false;
@@ -128,6 +131,9 @@ finishBtn.addEventListener('click', async () => {
   if (!value) return say('Bitte zuerst die Weiterleitungs-Adresse einfügen.', 'err');
   if (/auth\.tesla\.com\/oauth2\/v3\/authorize/.test(value)) {
     return say('Das ist der Login-Link aus Schritt 1. Gesucht ist die Adresse NACH dem Login, sie beginnt mit tesla://auth/callback?code=…', 'err');
+  }
+  if ((lastState && value === lastState) || (/state=/.test(value) && !/code=/.test(value))) {
+    return say('Das ist nur der state-Wert, nicht der Code. Bitte erst bei Tesla anmelden, dann die komplette Adresse der Fehlerseite einfügen (sie enthält code=… und state=…).', 'err');
   }
   finishBtn.disabled = true;
   say('Token wird bei Tesla eingetauscht …', 'muted');
